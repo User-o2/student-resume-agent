@@ -1,0 +1,60 @@
+{
+  "basic_info": {
+    "name": "王欣",
+    "university": "南京理工大学",
+    "major": "人工智能",
+    "grade": "大四",
+    "phone": "13800000002",
+    "email": "wangxin@example.com"
+  },
+  "job_intention": {
+    "target_position": "机器学习实习",
+    "target_industry": "人工智能",
+    "expected_city": "上海"
+  },
+  "education": {
+    "school": "南京理工大学",
+    "major": "人工智能",
+    "courses": ["机器学习", "深度学习", "模式识别", "概率论与数理统计", "Python 程序设计"],
+    "gpa_or_rank": "专业排名前 20%"
+  },
+  "projects": [
+    {
+      "title": "垃圾分类图像识别模型",
+      "start_date": "2025.02",
+      "end_date": "2025.05",
+      "technologies": ["Python", "PyTorch", "ResNet", "OpenCV"],
+      "responsibilities": [
+        "负责图像数据清洗、增强策略设计和 ResNet 模型训练",
+        "使用 OpenCV 完成图像尺寸归一化、噪声样本筛查和训练集划分"
+      ],
+      "results": [
+        "在课程数据集上将验证集准确率提升至 91.3%",
+        "整理实验记录和模型评估报告，为后续调参提供依据"
+      ],
+      "raw_description": "我做过垃圾分类图像识别模型，用 PyTorch 和 ResNet，负责数据清洗、增强和训练，准确率 91.3%。"
+    }
+  ],
+  "internship_note": "暂无正式实习经历，项目经历和竞赛实践作为主要证明材料。",
+  "skills": {
+    "programming_languages": ["Python", "C++"],
+    "tools": ["PyTorch", "OpenCV", "Git", "Linux"],
+    "professional_skills": ["图像分类", "数据增强", "模型训练与评估", "实验记录整理"],
+    "languages": ["英语四级"]
+  },
+  "awards": [
+    {
+      "name": "大学生数学建模竞赛省级三等奖",
+      "date": "2024",
+      "level": "省级",
+      "description": "负责数据处理与模型实现"
+    },
+    {
+      "name": "校级三等奖学金",
+      "date": "2025",
+      "level": "校级",
+      "description": ""
+    }
+  ],
+  "self_evaluation": "具备机器学习与图像识别项目经验，能够独立完成数据处理、模型训练、评估分析和实验复盘。对计算机视觉方向保持持续兴趣，希望在机器学习实习中提升真实业务场景下的模型优化与落地能力。"
+}

@@ -1,0 +1,694 @@
+"""学生简历生成智能体的编排逻辑。"""
+
+from __future__ import annotations
+
+import json
+import re
+import uuid
+from dataclasses import dataclass
+from typing import Any
+
+import httpx
+from langchain.agents import create_agent
+from langchain_core.language_models.chat_models import BaseChatModel
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_openai import ChatOpenAI
+from langgraph.checkpoint.memory import InMemorySaver
+
+from app.config import AppConfig, load_config
+from app.prompts import AGENT_SYSTEM_PROMPT, EXTRACTION_SYSTEM_PROMPT
+from app.schema import ResumeState
+from app.tools import (
+    RESUME_TOOLS,
+    check_missing_fields,
+    collect_resume_info,
+    coerce_resume_state,
+    fill_resume_template,
+    parse_json_object,
+    polish_state_experiences,
+)
+
+
+GENERATE_KEYWORDS = ("生成简历", "输出简历", "导出简历", "完成简历")
+CITY_KEYWORDS = (
+    "北京",
+    "上海",
+    "广州",
+    "深圳",
+    "杭州",
+    "南京",
+    "苏州",
+    "成都",
+    "武汉",
+    "西安",
+    "重庆",
+    "天津",
+    "长沙",
+    "厦门",
+    "青岛",
+    "远程",
+)
+ROLE_KEYWORDS = (
+    "Python 后端实习",
+    "后端开发实习",
+    "算法实习",
+    "机器学习实习",
+    "数据分析实习",
+    "前端开发实习",
+    "Java 后端实习",
+    "产品经理实习",
+    "测试开发实习",
+)
+TECH_KEYWORDS = (
+    "Python",
+    "Java",
+    "C++",
+    "JavaScript",
+    "TypeScript",
+    "Go",
+    "Flask",
+    "Django",
+    "FastAPI",
+    "Spring Boot",
+    "Vue",
+    "React",
+    "MySQL",
+    "PostgreSQL",
+    "Redis",
+    "Docker",
+    "Linux",
+    "PyTorch",
+    "TensorFlow",
+    "OpenCV",
+    "YOLO",
+    "ResNet",
+    "CNN",
+    "Pandas",
+    "NumPy",
+    "Git",
+    "Streamlit",
+)
+GRADE_KEYWORDS = ("大一", "大二", "大三", "大四", "研一", "研二", "研三", "本科", "硕士", "博士")
+
+
+@dataclass
+class AgentTurnResult:
+    """单轮对话处理结果。
+
+    Args:
+        assistant_message: 返回给用户的消息。
+        state: 更新后的简历状态。
+        missing_report: 缺失字段与质量检查报告。
+        resume_markdown: 生成的 Markdown 简历内容。
+        output_path: 生成文件路径。
+    """
+
+    assistant_message: str
+    state: ResumeState
+    missing_report: dict[str, Any]
+    resume_markdown: str = ""
+    output_path: str = ""
+
+
+def build_chat_model(config: AppConfig | None = None) -> BaseChatModel | None:
+    """构建 OpenAI 兼容的 LangChain 聊天模型。
+
+    Args:
+        config: 应用配置；为空时自动从 `.env` 加载。
+
+    Returns:
+        聊天模型实例；缺少 API Key 时返回 None。
+    """
+
+    app_config = config or load_config()
+    if not app_config.api_key:
+        return None
+
+    http_client = httpx.Client(
+        verify=app_config.ssl_verify,
+        timeout=60,
+        trust_env=True,
+    )
+
+    return ChatOpenAI(
+        model=app_config.model,
+        api_key=app_config.api_key,
+        base_url=app_config.base_url,
+        temperature=app_config.temperature,
+        timeout=60,
+        max_retries=2,
+        extra_body={"enable_thinking": app_config.enable_thinking},
+        http_client=http_client,
+        http_socket_options=(),
+    )
+
+
+def build_langchain_agent(llm: BaseChatModel | None = None) -> Any | None:
+    """构建带工具和内存检查点的 LangChain Agent。
+
+    Args:
+        llm: 聊天模型实例。
+
+    Returns:
+        LangChain Agent；模型不可用时返回 None。
+    """
+
+    if llm is None:
+        return None
+    return create_agent(
+        model=llm,
+        tools=RESUME_TOOLS,
+        system_prompt=AGENT_SYSTEM_PROMPT,
+        checkpointer=InMemorySaver(),
+    )
+
+
+def _contains_generate_intent(text: str) -> bool:
+    """判断用户是否明确要求生成简历。
+
+    Args:
+        text: 用户输入。
+
+    Returns:
+        是否为生成意图。
+    """
+
+    normalized = text.strip()
+    return normalized in {"生成", "输出", "导出"} or any(keyword in normalized for keyword in GENERATE_KEYWORDS)
+
+
+def _find_keywords(text: str, keywords: tuple[str, ...]) -> list[str]:
+    """从文本中匹配关键词。
+
+    Args:
+        text: 用户输入文本。
+        keywords: 候选关键词。
+
+    Returns:
+        命中的关键词列表。
+    """
+
+    lower_text = text.lower()
+    return [keyword for keyword in keywords if keyword.lower() in lower_text]
+
+
+def _split_cn_items(text: str) -> list[str]:
+    """按常见中文分隔符拆分条目。
+
+    Args:
+        text: 原始文本。
+
+    Returns:
+        清洗后的条目列表。
+    """
+
+    parts = re.split(r"[、,，;；/|\n]+", text)
+    return [part.strip(" ：:。.") for part in parts if part.strip(" ：:。.")]
+
+
+def _merge_patch(base: dict[str, Any], patch: dict[str, Any]) -> dict[str, Any]:
+    """合并两个抽取补丁。
+
+    Args:
+        base: 已有补丁。
+        patch: 新补丁。
+
+    Returns:
+        合并后的补丁。
+    """
+
+    if not patch:
+        return base
+    merged = collect_resume_info(base, patch).model_dump()
+    return _compact_patch(merged)
+
+
+def _compact_patch(value: Any, key: str = "") -> Any:
+    """移除补丁中的空值和状态元数据。
+
+    Args:
+        value: 待压缩的值。
+        key: 当前字段名。
+
+    Returns:
+        压缩后的值。
+    """
+
+    if key in {"current_stage", "created_at", "updated_at"}:
+        return None
+    if isinstance(value, dict):
+        compacted = {
+            item_key: _compact_patch(item_value, item_key)
+            for item_key, item_value in value.items()
+        }
+        return {item_key: item_value for item_key, item_value in compacted.items() if item_value not in (None, "", [], {})}
+    if isinstance(value, list):
+        compacted_list = [_compact_patch(item) for item in value]
+        return [item for item in compacted_list if item not in (None, "", [], {})]
+    return value if value not in (None, "", [], {}) else None
+
+
+def _extract_common_fields(text: str) -> dict[str, Any]:
+    """抽取不依赖当前阶段的通用字段。
+
+    Args:
+        text: 用户输入。
+
+    Returns:
+        字段更新字典。
+    """
+
+    update: dict[str, Any] = {}
+    basic: dict[str, Any] = {}
+    education: dict[str, Any] = {}
+
+    email_match = re.search(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+", text)
+    if email_match:
+        basic["email"] = email_match.group(0)
+
+    phone_match = re.search(r"(?<!\d)(?:1[3-9]\d{9}|\d{3,4}[-\s]?\d{7,8})(?!\d)", text)
+    if phone_match:
+        basic["phone"] = phone_match.group(0)
+
+    name_match = re.search(r"(?:我叫|姓名(?:是|为|[:：])?)([\u4e00-\u9fa5A-Za-z·]{2,20})", text)
+    if name_match:
+        basic["name"] = name_match.group(1).strip()
+
+    university_match = re.search(r"([\u4e00-\u9fa5A-Za-z]+(?:大学|学院))", text)
+    if university_match:
+        basic["university"] = university_match.group(1)
+        education["school"] = university_match.group(1)
+
+    major_match = re.search(r"专业(?:是|为|[:：])([\u4e00-\u9fa5A-Za-z0-9+\- ]{2,30})", text)
+    if major_match:
+        major = major_match.group(1).strip(" ，,。.")
+        basic["major"] = major
+        education["major"] = major
+    else:
+        suffix_major_match = re.search(r"([\u4e00-\u9fa5A-Za-z0-9+\-]{2,30}专业)", text)
+        if suffix_major_match:
+            major = suffix_major_match.group(1).removesuffix("专业")
+            university = basic.get("university")
+            if university and major.startswith(university):
+                major = major[len(university) :]
+            basic["major"] = major
+            education["major"] = major
+
+    for grade in GRADE_KEYWORDS:
+        if grade in text:
+            basic["grade"] = grade
+            break
+
+    course_match = re.search(r"(?:主修课程|课程)(?:包括|有|是|为|[:：])?(.+)", text)
+    if course_match:
+        education["courses"] = _split_cn_items(course_match.group(1))[:8]
+
+    rank_match = re.search(r"(GPA[:：]?\s*[\d.]+|排名[:：]?\s*前?\s*\d+%?|绩点[:：]?\s*[\d.]+|成绩[:：]?\s*[^，,。]+)", text)
+    if rank_match:
+        education["gpa_or_rank"] = rank_match.group(1).strip()
+
+    if basic:
+        update["basic_info"] = basic
+    if education:
+        update["education"] = education
+    return update
+
+
+def _extract_job_intention(text: str) -> dict[str, Any]:
+    """抽取求职意向字段。
+
+    Args:
+        text: 用户输入。
+
+    Returns:
+        求职意向更新字典。
+    """
+
+    job: dict[str, Any] = {}
+    cities = _find_keywords(text, CITY_KEYWORDS)
+    roles = _find_keywords(text, ROLE_KEYWORDS)
+
+    if roles:
+        job["target_position"] = roles[0]
+    else:
+        position_match = re.search(r"(?:投递|投|应聘|申请|想做|目标岗位(?:是|为)?)([^，,。；;]+)", text)
+        if position_match:
+            job["target_position"] = position_match.group(1).strip()
+
+    if cities:
+        job["expected_city"] = cities[0]
+    industry_match = re.search(r"(互联网|人工智能|金融科技|教育科技|制造业|游戏|电商)", text)
+    if industry_match:
+        job["target_industry"] = industry_match.group(1)
+    return {"job_intention": job} if job else {}
+
+
+def _extract_experience(text: str, category: str) -> dict[str, Any]:
+    """抽取项目或实习实践经历。
+
+    Args:
+        text: 用户输入。
+        category: `projects` 或 `internships`。
+
+    Returns:
+        经历更新字典。
+    """
+
+    if category == "internships" and re.search(r"(没有|暂无|无).{0,6}(实习|实践)", text):
+        return {"internship_note": "暂无正式实习经历，可使用课程实践、竞赛经历或项目经历补充。"}
+
+    title_match = re.search(r"([\u4e00-\u9fa5A-Za-z0-9]+(?:平台|系统|网站|小程序|项目|模型|算法|应用))", text)
+    technologies = _find_keywords(text, TECH_KEYWORDS)
+    result_clauses = [
+        clause.strip()
+        for clause in re.split(r"[。；;\n]", text)
+        if re.search(r"\d|%|提升|准确率|召回率|上线|用户|排名|效率|降低|优化", clause)
+    ]
+    responsibility_clauses = [
+        clause.strip()
+        for clause in re.split(r"[。；;\n]", text)
+        if re.search(r"负责|开发|实现|设计|搭建|完成|参与|优化|训练|部署", clause)
+    ]
+
+    item: dict[str, Any] = {
+        "title": title_match.group(1) if title_match else "",
+        "technologies": technologies,
+        "responsibilities": responsibility_clauses[:4] or [text.strip()],
+        "results": result_clauses[:3],
+        "raw_description": text.strip(),
+    }
+
+    if category == "internships":
+        org_match = re.search(r"在([^，,。；;]{2,30})(?:担任|做|实习|实践)", text)
+        role_match = re.search(r"(?:担任|岗位(?:是|为)?)([^，,。；;]{2,20})", text)
+        if org_match:
+            item["organization"] = org_match.group(1).strip()
+        if role_match:
+            item["role"] = role_match.group(1).strip()
+
+    return {category: [item]}
+
+
+def _extract_skills_and_awards(text: str) -> dict[str, Any]:
+    """抽取技能与荣誉奖项。
+
+    Args:
+        text: 用户输入。
+
+    Returns:
+        技能和奖项更新字典。
+    """
+
+    update: dict[str, Any] = {}
+    technologies = _find_keywords(text, TECH_KEYWORDS)
+    programming = [item for item in technologies if item in {"Python", "Java", "C++", "JavaScript", "TypeScript", "Go"}]
+    tools = [item for item in technologies if item not in set(programming)]
+
+    skills: dict[str, Any] = {}
+    if programming:
+        skills["programming_languages"] = programming
+    if tools:
+        skills["tools"] = tools
+    if any(keyword in text for keyword in ("数据分析", "机器学习", "后端开发", "接口设计", "数据库", "深度学习")):
+        skills["professional_skills"] = _split_cn_items(text)[:8]
+    language_match = re.search(r"(英语[四六六四]级|CET-?[46]|雅思\d(?:\.\d)?|托福\d+)", text, flags=re.IGNORECASE)
+    if language_match:
+        skills["languages"] = [language_match.group(1)]
+    if skills:
+        update["skills"] = skills
+
+    award_clauses = [
+        clause.strip()
+        for clause in re.split(r"[。；;\n]", text)
+        if any(keyword in clause for keyword in ("奖", "证书", "竞赛", "奖学金"))
+    ]
+    if award_clauses:
+        update["awards"] = [{"name": clause[:50], "description": clause} for clause in award_clauses[:5]]
+    return update
+
+
+def _heuristic_extract_update(text: str, state: ResumeState) -> dict[str, Any]:
+    """在 LLM 不可用时根据当前阶段进行规则抽取。
+
+    Args:
+        text: 用户输入。
+        state: 当前简历状态。
+
+    Returns:
+        字段更新字典。
+    """
+
+    update = _extract_common_fields(text)
+    stage = state.current_stage
+
+    if stage == "job_intention":
+        update = _merge_patch(update, _extract_job_intention(text))
+    elif stage == "basic_education":
+        pass
+    elif stage == "projects":
+        update = _merge_patch(update, _extract_experience(text, "projects"))
+    elif stage == "internships":
+        update = _merge_patch(update, _extract_experience(text, "internships"))
+    elif stage == "skills_awards":
+        update = _merge_patch(update, _extract_skills_and_awards(text))
+    elif stage == "self_evaluation":
+        update["self_evaluation"] = text.strip()
+    else:
+        update = _merge_patch(update, _extract_job_intention(text))
+        update = _merge_patch(update, _extract_skills_and_awards(text))
+
+    if any(keyword in text for keyword in ("岗位", "投", "应聘", "实习", "城市")):
+        update = _merge_patch(update, _extract_job_intention(text))
+    return _compact_patch(parse_json_object(json.dumps(update, ensure_ascii=False))) or {}
+
+
+def _llm_extract_update(text: str, state: ResumeState, llm: BaseChatModel | None) -> dict[str, Any]:
+    """使用 LLM 抽取用户本轮提供的结构化信息。
+
+    Args:
+        text: 用户输入。
+        state: 当前简历状态。
+        llm: 聊天模型实例。
+
+    Returns:
+        字段更新字典。
+    """
+
+    if llm is None:
+        return {}
+
+    prompt = ChatPromptTemplate.from_messages(
+        [
+            ("system", EXTRACTION_SYSTEM_PROMPT),
+            (
+                "human",
+                "当前阶段：{stage}\n当前状态 JSON：{state_json}\n用户本轮输入：{user_input}",
+            ),
+        ]
+    )
+    try:
+        response = (prompt | llm).invoke(
+            {
+                "stage": state.current_stage,
+                "state_json": state.model_dump_json(ensure_ascii=False),
+                "user_input": text,
+            }
+        )
+        content = getattr(response, "content", str(response))
+        if isinstance(content, list):
+            content = "\n".join(str(item) for item in content)
+        return parse_json_object(str(content))
+    except Exception:
+        return {}
+
+
+def _has_basic_education_gap(state: ResumeState) -> bool:
+    """判断基本信息与教育背景是否仍有关键缺口。
+
+    Args:
+        state: 当前简历状态。
+
+    Returns:
+        是否存在缺口。
+    """
+
+    return any(
+        [
+            not state.basic_info.name,
+            not state.basic_info.university,
+            not state.basic_info.major,
+            not state.basic_info.email,
+            not state.education.courses and not state.education.gpa_or_rank,
+        ]
+    )
+
+
+def _has_project_gap(report: dict[str, Any]) -> bool:
+    """判断项目经历是否仍有缺失或质量问题。
+
+    Args:
+        report: 缺失字段报告。
+
+    Returns:
+        是否存在项目问题。
+    """
+
+    missing = report.get("missing_fields", [])
+    quality = report.get("quality_questions", [])
+    return any("项目经历" in item for item in missing) or bool(quality)
+
+
+def _has_skill_gap(report: dict[str, Any]) -> bool:
+    """判断技能字段是否缺失。
+
+    Args:
+        report: 缺失字段报告。
+
+    Returns:
+        是否缺少技能信息。
+    """
+
+    return any("技能特长" in item for item in report.get("missing_fields", []))
+
+
+def _sync_stage(state: ResumeState, previous_stage: str, report: dict[str, Any]) -> ResumeState:
+    """根据状态完整度同步当前对话阶段。
+
+    Args:
+        state: 当前简历状态。
+        previous_stage: 更新前阶段。
+        report: 缺失字段报告。
+
+    Returns:
+        更新阶段后的简历状态。
+    """
+
+    if not state.job_intention.target_position or not state.job_intention.expected_city:
+        state.current_stage = "job_intention"
+    elif _has_basic_education_gap(state):
+        state.current_stage = "basic_education"
+    elif _has_project_gap(report):
+        state.current_stage = "projects"
+    elif previous_stage in {"projects", "internships"} and not state.internships and not state.internship_note:
+        state.current_stage = "internships"
+    elif _has_skill_gap(report):
+        state.current_stage = "skills_awards"
+    elif not state.self_evaluation:
+        state.current_stage = "self_evaluation"
+    else:
+        state.current_stage = "ready"
+    state.touch()
+    return state
+
+
+def build_followup_question(state: ResumeState, report: dict[str, Any]) -> str:
+    """根据阶段和缺失报告生成追问。
+
+    Args:
+        state: 当前简历状态。
+        report: 缺失字段报告。
+
+    Returns:
+        下一轮对用户的追问文本。
+    """
+
+    if state.current_stage == "job_intention":
+        return "请先补充求职意向：目标岗位、目标行业或方向、期望城市。例如：Python 后端实习，互联网行业，杭州。"
+    if state.current_stage == "basic_education":
+        return "请补充基本信息和教育背景：姓名、学校、专业、年级、邮箱，以及主修课程或成绩排名。"
+    if state.current_stage == "projects":
+        quality_questions = report.get("quality_questions", [])
+        if quality_questions:
+            return quality_questions[0]
+        return "请介绍 1 段项目经历，尽量包含项目名称、时间、技术栈、个人职责和项目成果。"
+    if state.current_stage == "internships":
+        return "请补充实习或实践经历；如果没有正式实习，可以说明暂无，或填写课程设计、竞赛实践、社团技术实践。"
+    if state.current_stage == "skills_awards":
+        return "请补充技能和荣誉奖项，包括编程语言、框架工具、专业技能、语言能力、竞赛奖项、奖学金或证书。"
+    if state.current_stage == "self_evaluation":
+        return "请补充自我评价，重点说明个人优势、职业兴趣和发展方向，控制在 2-4 句话。"
+    return "信息已基本完整。回复“生成简历”即可输出 Markdown 简历；也可以继续补充需要强调的内容。"
+
+
+class ResumeAgentService:
+    """面向 UI 和脚本的简历 Agent 服务。"""
+
+    def __init__(self, use_llm: bool = True, config: AppConfig | None = None) -> None:
+        """初始化简历 Agent 服务。
+
+        Args:
+            use_llm: 是否启用 LLM 抽取与润色。
+            config: 可选应用配置。
+
+        Returns:
+            None。
+        """
+
+        self.config = config or load_config()
+        self.llm = build_chat_model(self.config) if use_llm else None
+        self.langchain_agent = build_langchain_agent(self.llm)
+        self.thread_id = str(uuid.uuid4())
+
+    def extract_update(self, user_input: str, state: ResumeState) -> dict[str, Any]:
+        """抽取用户本轮提供的简历字段更新。
+
+        Args:
+            user_input: 用户输入。
+            state: 当前简历状态。
+
+        Returns:
+            字段更新字典。
+        """
+
+        llm_update = _llm_extract_update(user_input, state, self.llm)
+        heuristic_update = _heuristic_extract_update(user_input, state)
+        return _merge_patch(heuristic_update, _compact_patch(llm_update) or {})
+
+    def handle_message(
+        self,
+        user_input: str,
+        state: ResumeState | dict[str, Any] | str | None,
+    ) -> AgentTurnResult:
+        """处理单轮用户消息。
+
+        Args:
+            user_input: 用户输入。
+            state: 当前简历状态。
+
+        Returns:
+            单轮处理结果。
+        """
+
+        resume_state = coerce_resume_state(state)
+        previous_stage = resume_state.current_stage
+
+        if user_input.strip():
+            update = self.extract_update(user_input, resume_state)
+            resume_state = collect_resume_info(resume_state, update)
+
+        report = check_missing_fields(resume_state)
+        resume_state = _sync_stage(resume_state, previous_stage, report)
+        report = check_missing_fields(resume_state)
+
+        if _contains_generate_intent(user_input):
+            if not report["is_ready"]:
+                missing_text = "；".join(report["missing_fields"] + report["quality_questions"])
+                message = f"现在还不能生成完整简历，仍需补充：{missing_text}\n\n{build_followup_question(resume_state, report)}"
+                return AgentTurnResult(message, resume_state, report)
+
+            polished_state = polish_state_experiences(resume_state, self.llm)
+            result = fill_resume_template(polished_state)
+            message = f"已生成 Markdown 简历：{result['output_path']}\n\n{result['markdown']}"
+            return AgentTurnResult(
+                assistant_message=message,
+                state=polished_state,
+                missing_report=report,
+                resume_markdown=result["markdown"],
+                output_path=result["output_path"],
+            )
+
+        return AgentTurnResult(
+            assistant_message=build_followup_question(resume_state, report),
+            state=resume_state,
+            missing_report=report,
+        )

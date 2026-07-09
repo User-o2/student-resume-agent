@@ -1,0 +1,68 @@
+{
+  "basic_info": {
+    "name": "李明",
+    "university": "浙江工业大学",
+    "major": "计算机科学与技术",
+    "grade": "大三",
+    "phone": "13800000001",
+    "email": "liming@example.com"
+  },
+  "job_intention": {
+    "target_position": "Python 后端实习",
+    "target_industry": "互联网",
+    "expected_city": "杭州"
+  },
+  "education": {
+    "school": "浙江工业大学",
+    "major": "计算机科学与技术",
+    "courses": ["数据结构", "操作系统", "计算机网络", "数据库系统", "软件工程"],
+    "gpa_or_rank": "GPA 3.7/4.0，专业前 15%"
+  },
+  "projects": [
+    {
+      "title": "校园二手交易平台",
+      "start_date": "2025.03",
+      "end_date": "2025.06",
+      "technologies": ["Python", "FastAPI", "MySQL", "Redis"],
+      "responsibilities": [
+        "负责后端接口设计与核心业务逻辑实现，完成用户认证、商品发布、订单管理和信息检索模块",
+        "基于 MySQL 设计商品、订单、用户等核心数据表，并使用 Redis 缓存热门商品查询结果"
+      ],
+      "results": [
+        "完成 18 个 RESTful API，支持 200+ 条商品信息的稳定管理与查询",
+        "通过缓存优化使商品列表接口平均响应时间降低约 30%"
+      ],
+      "raw_description": "我做过校园二手交易平台，主要写后端接口，用 FastAPI、MySQL 和 Redis，完成用户认证、商品发布、订单管理，接口响应快了一些。"
+    }
+  ],
+  "internships": [
+    {
+      "title": "教务数据管理实践",
+      "organization": "学校信息化办公室",
+      "role": "后端开发实践",
+      "technologies": ["Python", "Pandas", "MySQL"],
+      "responsibilities": [
+        "协助整理课程与成绩数据，编写数据清洗脚本并输出统计报表"
+      ],
+      "results": [
+        "将人工整理时间从半天缩短到约 30 分钟"
+      ],
+      "raw_description": "在学校信息化办公室做教务数据管理实践，用 Python 和 Pandas 清洗课程成绩数据，生成统计报表。"
+    }
+  ],
+  "skills": {
+    "programming_languages": ["Python", "JavaScript"],
+    "tools": ["Git", "Docker", "Linux", "MySQL", "Redis"],
+    "professional_skills": ["RESTful API 设计", "数据库建模", "后端接口开发"],
+    "languages": ["英语六级"]
+  },
+  "awards": [
+    {
+      "name": "校级程序设计竞赛二等奖",
+      "date": "2025",
+      "level": "校级",
+      "description": "团队排名前 10%"
+    }
+  ],
+  "self_evaluation": "具备扎实的计算机基础和后端开发实践经验，熟悉 Python Web 开发、数据库设计与接口联调。希望在互联网后端实习中继续提升工程化开发、性能优化和复杂业务建模能力。"
+}
