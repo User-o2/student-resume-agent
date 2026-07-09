@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+import time
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -24,6 +25,7 @@ def main() -> None:
     """
 
     config = load_config()
+    print(f"provider: {config.provider}")
     print(f"base_url: {config.base_url}")
     print(f"model: {config.model}")
     print(f"ssl_verify: {config.ssl_verify}")
@@ -31,11 +33,14 @@ def main() -> None:
 
     llm = build_chat_model(config)
     if llm is None:
-        raise RuntimeError("未读取到 API Key，请检查 .env 中的 api_key。")
+        raise RuntimeError("未读取到 API Key，请检查 .env 中的 office_api_key 或 api_key。")
 
+    start_time = time.perf_counter()
     response = llm.invoke("请只回复 OK")
+    elapsed = time.perf_counter() - start_time
     content = getattr(response, "content", response)
     print(f"response: {str(content).strip()}")
+    print(f"elapsed_seconds: {elapsed:.2f}")
 
 
 if __name__ == "__main__":

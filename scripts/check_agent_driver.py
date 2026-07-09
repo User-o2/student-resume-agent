@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sys
+import time
 from argparse import ArgumentParser
 from pathlib import Path
 
@@ -12,7 +13,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from app.agent import ResumeAgentService
-from app.config import EXAMPLES_DIR
+from app.config import EXAMPLES_DIR, load_config
 from app.schema import ResumeState
 
 
@@ -55,16 +56,24 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    service = ResumeAgentService(use_llm=True, use_agent_driver=True)
+    config = load_config()
+    print(f"provider: {config.provider}")
+    print(f"base_url: {config.base_url}")
+    print(f"model: {config.model}")
+    print(f"ssl_verify: {config.ssl_verify}")
 
+    service = ResumeAgentService(config=config, use_llm=True, use_agent_driver=True)
+
+    first_start = time.perf_counter()
     first_turn = service.handle_message(
         "我想投 Python 后端实习，互联网行业，杭州",
         ResumeState(),
     )
+    print(f"elapsed_seconds: {time.perf_counter() - first_start:.2f}")
     print_turn_result("采集求职意向", first_turn)
 
-    if not first_turn.agent_trace:
-        raise RuntimeError("采集场景没有发现 Agent 工具调用轨迹。")
+    if not any(item.startswith("调用工具：") for item in first_turn.agent_trace):
+        raise RuntimeError("采集场景没有发现真实 Agent 工具调用轨迹。")
     if not first_turn.state.job_intention.target_position:
         raise RuntimeError("Agent 没有成功更新求职意向。")
 
@@ -74,7 +83,9 @@ def main() -> None:
 
     case_data = json.loads((EXAMPLES_DIR / "student_case_1.json").read_text(encoding="utf-8"))
     ready_state = ResumeState.model_validate(case_data)
+    generate_start = time.perf_counter()
     generate_turn = service.handle_message("生成简历", ready_state)
+    print(f"elapsed_seconds: {time.perf_counter() - generate_start:.2f}")
     print_turn_result("生成完整简历", generate_turn)
 
     if not generate_turn.output_path:

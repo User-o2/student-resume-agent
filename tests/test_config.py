@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import os
+import tempfile
 import unittest
+from pathlib import Path
+from unittest.mock import patch
 
-from app.config import normalize_openai_base_url, parse_bool_env, resolve_ssl_verify
+from app.config import DEFAULT_ALIYUN_BASE_URL, load_config, normalize_openai_base_url, parse_bool_env, resolve_ssl_verify
 
 
 class ConfigTestCase(unittest.TestCase):
@@ -37,6 +41,54 @@ class ConfigTestCase(unittest.TestCase):
         self.assertTrue(parse_bool_env("true"))
         self.assertFalse(parse_bool_env("false"))
         self.assertIsNone(parse_bool_env("unknown"))
+
+    def test_load_config_prefers_official_aliyun_settings(self) -> None:
+        """验证官方阿里云配置会覆盖旧的统一 API 配置。"""
+
+        env_text = "\n".join(
+            [
+                "base_url=https://api_2604_w5t3.zlth.cn/v1/chat/completions",
+                "api_key=legacy-key",
+                "model=legacy-model",
+                "office_base_url=https://workspace.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
+                "office_api_key=official-key",
+                "office_model=official-model",
+            ]
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            env_path = Path(tmpdir) / ".env"
+            env_path.write_text(env_text, encoding="utf-8")
+            with patch.dict(os.environ, {}, clear=True):
+                config = load_config(env_path)
+
+        self.assertEqual(config.provider, "aliyun_official")
+        self.assertEqual(config.api_key, "official-key")
+        self.assertEqual(config.base_url, "https://workspace.cn-beijing.maas.aliyuncs.com/compatible-mode/v1")
+        self.assertEqual(config.model, "official-model")
+        self.assertTrue(config.ssl_verify)
+
+    def test_load_config_uses_official_default_base_url_without_explicit_url(self) -> None:
+        """验证只配置官方 Key 时不会回退到旧的统一 API 地址。"""
+
+        env_text = "\n".join(
+            [
+                "base_url=https://api_2604_w5t3.zlth.cn/v1/chat/completions",
+                "api_key=legacy-key",
+                "office_api_key=official-key",
+            ]
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            env_path = Path(tmpdir) / ".env"
+            env_path.write_text(env_text, encoding="utf-8")
+            with patch.dict(os.environ, {}, clear=True):
+                config = load_config(env_path)
+
+        self.assertEqual(config.provider, "aliyun_official")
+        self.assertEqual(config.base_url, DEFAULT_ALIYUN_BASE_URL)
+        self.assertEqual(config.api_key, "official-key")
+        self.assertTrue(config.ssl_verify)
 
 
 if __name__ == "__main__":

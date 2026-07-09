@@ -39,6 +39,12 @@
 `.env` 使用以下字段：
 
 ```dotenv
+# 推荐：阿里云百炼官方 OpenAI 兼容接口
+office_base_url=https://你的业务空间ID.cn-beijing.maas.aliyuncs.com/compatible-mode/v1
+office_api_key=你的_阿里云百炼_API_Key
+office_model=qwen3.6-35b-a3b
+
+# 兼容旧配置：仅在没有 office_api_key 时使用
 base_url=https://example.com/v1/chat/completions
 api_key=你的_API_Key
 model=qwen3.6-35b-a3b
@@ -46,7 +52,7 @@ model=qwen3.6-35b-a3b
 ssl_verify=false
 ```
 
-代码会把 `/chat/completions` 后缀规整为 OpenAI SDK 需要的 `base_url`，并通过 `extra_body={"enable_thinking": false}` 关闭模型 thinking 模式。老师提供的统一域名包含下划线时，Python/OpenSSL 无法通过 wildcard 证书的 hostname 校验，代码会自动关闭该地址的 HTTPS hostname 校验以保证本地验收可联网调用。
+代码会优先读取 `office_*`、`official_*`、`DASHSCOPE_*` 或 `ALIYUN_*` 官方配置；只有未配置官方 API Key 时才回退到旧的 `api_key/base_url`。代码会把 `/chat/completions` 后缀规整为 OpenAI SDK 需要的 `base_url`，并通过 `extra_body={"enable_thinking": false}` 关闭模型 thinking 模式。老师提供的统一域名包含下划线时，Python/OpenSSL 无法通过 wildcard 证书的 hostname 校验，代码会自动关闭该地址的 HTTPS hostname 校验以保证本地验收可联网调用。
 
 ## 联网调用检查
 
