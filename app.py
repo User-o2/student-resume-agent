@@ -47,7 +47,7 @@ def init_session_state() -> None:
         st.session_state.messages = [
             {
                 "role": "assistant",
-                "content": "你好，我会按新版标准模板帮你生成学生简历。请先告诉我目标岗位、目标行业、期望城市，以及姓名、电话、邮箱和籍贯。",
+                "content": "你好，我是简历生成智能体。我可以帮你梳理经历、优化表达，最终生成一份专业的求职简历！",
             }
         ]
     if "resume_markdown" not in st.session_state:
