@@ -14,15 +14,14 @@ from langchain_core.tools import tool
 
 from app.config import DEFAULT_TEMPLATE_PATH, OUTPUTS_DIR
 from app.prompts import POLISH_EXPERIENCE_PROMPT
-from app.schema import Award, Experience, ResumeState
+from app.schema import Award, Experience, ResumeState, Skills
 
 
 STAGE_LABELS = {
-    "job_intention": "求职意向",
-    "basic_education": "基本信息与教育背景",
+    "personal_info": "个人信息",
+    "education": "教育背景",
     "projects": "项目经历",
-    "internships": "实习或实践经历",
-    "skills_awards": "技能与荣誉奖项",
+    "awards": "竞赛获奖",
     "self_evaluation": "自我评价",
     "ready": "可生成简历",
 }
@@ -251,6 +250,8 @@ def collect_resume_info(
         data["education"]["school"] = data["basic_info"]["university"]
     if data["basic_info"].get("major") and not data["education"].get("major"):
         data["education"]["major"] = data["basic_info"]["major"]
+    if data.get("skills", {}).get("languages") and not data["education"].get("english_level"):
+        data["education"]["english_level"] = " | ".join(data["skills"]["languages"])
 
     updated_state = ResumeState.model_validate(data)
     updated_state.touch()
@@ -277,30 +278,51 @@ def _has_any_skill(state: ResumeState) -> bool:
     )
 
 
-def _has_required_contact(state: ResumeState) -> bool:
-    """判断是否已有至少一种联系方式。
+def _has_required_tech_stack(state: ResumeState) -> bool:
+    """判断是否已有可填入模板的技术栈。
 
     Args:
         state: 当前简历状态。
 
     Returns:
-        是否包含邮箱或手机号。
+        是否存在至少一种技术或专业技能。
     """
 
-    return bool(state.basic_info.email or state.basic_info.phone)
+    return _has_any_skill(state)
 
 
-def _has_required_education(state: ResumeState) -> bool:
-    """判断教育背景是否达到生成简历的最低要求。
+def _experience_has_template_content(experience: Experience) -> bool:
+    """判断经历是否能支撑模板中的项目条目。
 
     Args:
-        state: 当前简历状态。
+        experience: 项目经历。
 
     Returns:
-        是否有主修课程或成绩排名。
+        是否包含标题和至少一条可展示描述。
     """
 
-    return bool(state.education.courses or state.education.gpa_or_rank)
+    return bool(
+        experience.title
+        and (
+            experience.polished_bullets
+            or experience.responsibilities
+            or experience.results
+            or experience.raw_description
+        )
+    )
+
+
+def _award_has_template_content(award: Award) -> bool:
+    """判断奖项是否能支撑模板中的竞赛获奖条目。
+
+    Args:
+        award: 奖项记录。
+
+    Returns:
+        是否包含奖项名称和至少一条可展示描述。
+    """
+
+    return bool(award.name and (award.highlights or award.description or award.date or award.level))
 
 
 def _experience_quality_questions(experience: Experience, category: str) -> list[str]:
@@ -374,36 +396,53 @@ def check_missing_fields(state: ResumeState | Mapping[str, Any] | str | None) ->
     optional_suggestions: list[str] = []
 
     if not resume_state.job_intention.target_position:
-        missing_fields.append("求职意向：目标岗位")
+        missing_fields.append("个人信息：目标岗位")
     if not resume_state.job_intention.target_industry:
-        optional_suggestions.append("可补充目标行业，让简历表达更聚焦。")
+        missing_fields.append("个人信息：目标行业")
     if not resume_state.job_intention.expected_city:
-        optional_suggestions.append("可补充期望城市，便于生成完整求职意向。")
+        missing_fields.append("个人信息：期望城市")
     if not resume_state.basic_info.name:
-        missing_fields.append("基本信息：姓名")
-    if not resume_state.basic_info.university:
-        missing_fields.append("基本信息：学校")
-    if not resume_state.basic_info.major:
-        missing_fields.append("基本信息：专业")
-    if not resume_state.basic_info.grade:
-        missing_fields.append("基本信息：年级")
-    if not _has_required_contact(resume_state):
-        missing_fields.append("基本信息：邮箱或手机号")
-    if not _has_required_education(resume_state):
-        missing_fields.append("教育背景：主修课程或成绩排名")
+        missing_fields.append("个人信息：姓名")
+    if not resume_state.basic_info.phone:
+        missing_fields.append("个人信息：电话")
+    if not resume_state.basic_info.email:
+        missing_fields.append("个人信息：邮箱")
+    if not resume_state.basic_info.native_place:
+        missing_fields.append("个人信息：籍贯")
+    if not (resume_state.education.school or resume_state.basic_info.university):
+        missing_fields.append("教育背景：学校")
+    if not resume_state.education.college:
+        missing_fields.append("教育背景：学院")
+    if not (resume_state.education.major or resume_state.basic_info.major):
+        missing_fields.append("教育背景：专业")
+    if not resume_state.education.gpa_or_rank:
+        missing_fields.append("教育背景：专业排名")
+    if not resume_state.education.english_level:
+        missing_fields.append("教育背景：英语水平")
+    if not resume_state.education.courses:
+        missing_fields.append("教育背景：核心课程")
+    if not _has_required_tech_stack(resume_state):
+        missing_fields.append("教育背景：技术栈")
+
     meaningful_projects = _meaningful_experiences(resume_state.projects)
     if meaningful_projects:
-        quality_questions.extend(_experience_quality_questions(meaningful_projects[0], "项目经历"))
+        if not _experience_has_template_content(meaningful_projects[0]):
+            missing_fields.append("项目经历：项目标题和项目要点")
+        else:
+            quality_questions.extend(_experience_quality_questions(meaningful_projects[0], "项目经历"))
     else:
-        optional_suggestions.append("建议补充至少 1 段项目、实习、科研或竞赛经历，用来支撑简历主体。")
-    if not _has_any_skill(resume_state):
-        optional_suggestions.append("建议补充技能特长，例如编程语言、框架、工具或专业能力。")
+        missing_fields.append("项目经历：至少 1 段项目经历")
+
+    meaningful_awards = [award for award in resume_state.awards if _award_has_template_content(award)]
+    if not meaningful_awards:
+        missing_fields.append("竞赛获奖：至少 1 项竞赛、奖学金或证书")
+
     if not resume_state.self_evaluation:
-        optional_suggestions.append("可补充 1-2 句自我评价，突出优势和方向。")
-    if not resume_state.internships and not resume_state.internship_note:
-        optional_suggestions.append("可补充实习、课程实践、社团实践或说明暂无正式实习。")
-    if not resume_state.awards:
-        optional_suggestions.append("可补充竞赛奖项、奖学金、证书或说明暂无。")
+        missing_fields.append("自我评价：2-3 条个人优势")
+    if len(meaningful_projects) < 2:
+        optional_suggestions.append("建议补充第 2 段项目经历，让项目板块更接近标准示例。")
+    if len(meaningful_awards) < 2:
+        optional_suggestions.append("建议补充第 2 项竞赛获奖、奖学金或证书，让奖项板块更完整。")
 
     return {
         "is_ready": not missing_fields,
@@ -518,26 +557,28 @@ def polish_state_experiences(
     return resume_state
 
 
-def _join_or_default(items: list[str], default: str = "待补充") -> str:
-    """将列表拼接为中文顿号分隔文本。
+def _join_or_default(items: list[str], default: str = "待补充", separator: str = "、") -> str:
+    """将列表拼接为指定分隔符文本。
 
     Args:
         items: 字符串列表。
         default: 空列表时的默认文本。
+        separator: 拼接使用的分隔符。
 
     Returns:
         拼接后的文本。
     """
 
-    return "、".join(items) if items else default
+    return separator.join(items) if items else default
 
 
-def _format_experiences(experiences: list[Experience], empty_text: str) -> str:
-    """格式化项目或实习经历为 Markdown。
+def _format_experiences(experiences: list[Experience], empty_text: str, max_items: int | None = None) -> str:
+    """格式化项目经历为新版模板 Markdown。
 
     Args:
         experiences: 经历列表。
         empty_text: 空列表时的展示文本。
+        max_items: 最多展示的经历数量。
 
     Returns:
         Markdown 文本。
@@ -548,15 +589,10 @@ def _format_experiences(experiences: list[Experience], empty_text: str) -> str:
         return empty_text
 
     blocks: list[str] = []
-    for experience in meaningful_experiences:
+    selected_experiences = meaningful_experiences[:max_items] if max_items else meaningful_experiences
+    for experience in selected_experiences:
         title = experience.title or "未命名经历"
-        time_range = " - ".join(part for part in [experience.start_date, experience.end_date] if part)
-        meta_parts = [part for part in [experience.organization, experience.role, time_range] if part]
-        lines = [f"### {title}"]
-        if meta_parts:
-            lines.append(f"**{' | '.join(meta_parts)}**")
-        if experience.technologies:
-            lines.append(f"**技术/工具：** {_join_or_default(experience.technologies)}")
+        lines = [f"**{title}**"]
         bullets = experience.polished_bullets or (experience.responsibilities + experience.results)
         if not bullets and experience.raw_description:
             bullets = polish_experience(experience.raw_description)
@@ -566,7 +602,7 @@ def _format_experiences(experiences: list[Experience], empty_text: str) -> str:
 
 
 def _format_awards(awards: list[Award]) -> str:
-    """格式化荣誉奖项为 Markdown。
+    """格式化竞赛获奖为新版模板 Markdown。
 
     Args:
         awards: 奖项列表。
@@ -578,12 +614,58 @@ def _format_awards(awards: list[Award]) -> str:
     if not awards:
         return "- 待补充"
 
-    lines: list[str] = []
+    blocks: list[str] = []
     for award in awards:
-        details = " | ".join(part for part in [award.date, award.level, award.description] if part)
-        suffix = f"（{details}）" if details else ""
-        lines.append(f"- {award.name or '未命名奖项'}{suffix}")
-    return "\n".join(lines)
+        if not _award_has_template_content(award):
+            continue
+        lines = [f"**{award.name or '未命名奖项'}**"]
+        highlights = list(award.highlights)
+        if not highlights:
+            detail_parts = [part for part in [award.date, award.level, award.description] if part]
+            if detail_parts:
+                highlights = [" | ".join(detail_parts)]
+        lines.extend(f"- {item}" for item in _clean_markdown_list(highlights))
+        blocks.append("\n".join(lines))
+    return "\n\n".join(blocks) if blocks else "- 待补充"
+
+
+def _format_self_evaluation(text: str) -> str:
+    """格式化自我评价为 Markdown 列表。
+
+    Args:
+        text: 自我评价原始文本。
+
+    Returns:
+        Markdown 列表文本。
+    """
+
+    if not text.strip():
+        return "- 待补充"
+
+    items = _clean_markdown_list(re.split(r"[\n。；;]+", text))
+    return "\n".join(f"- {item}" for item in items[:4]) if items else f"- {text.strip()}"
+
+
+def _format_tech_stack(skills: Skills) -> str:
+    """格式化模板教育背景中的技术栈。
+
+    Args:
+        skills: 技能结构化字段。
+
+    Returns:
+        技术栈文本。
+    """
+
+    items = (
+        list(skills.programming_languages)
+        + list(skills.tools)
+        + list(skills.professional_skills)
+    )
+    deduped: list[str] = []
+    for item in items:
+        if item and item not in deduped:
+            deduped.append(item)
+    return _join_or_default(deduped, separator=", ")
 
 
 def build_template_context(state: ResumeState | Mapping[str, Any] | str | None) -> dict[str, str]:
@@ -602,39 +684,29 @@ def build_template_context(state: ResumeState | Mapping[str, Any] | str | None) 
     education = resume_state.education
     skills = resume_state.skills
 
-    education_lines = [
-        f"- **学校专业：** {education.school or basic.university or '待补充'} - {education.major or basic.major or '待补充'}",
-        f"- **年级：** {basic.grade or '待补充'}",
-        f"- **主修课程：** {_join_or_default(education.courses)}",
-        f"- **成绩/排名：** {education.gpa_or_rank or '待补充'}",
-    ]
-
-    skill_lines = [
-        f"- **编程语言：** {_join_or_default(skills.programming_languages)}",
-        f"- **工具软件：** {_join_or_default(skills.tools)}",
-        f"- **专业技能：** {_join_or_default(skills.professional_skills)}",
-        f"- **语言能力：** {_join_or_default(skills.languages)}",
-    ]
-
     return {
         "name": basic.name or "姓名待补充",
-        "job_intention": " / ".join(
-            part for part in [job.target_position, job.target_industry, job.expected_city] if part
-        )
-        or "待补充",
+        "target_position": job.target_position or "待补充",
+        "target_industry": job.target_industry or "待补充",
+        "expected_city": job.expected_city or "待补充",
         "phone": basic.phone or "待补充",
         "email": basic.email or "待补充",
+        "native_place": basic.native_place or "待补充",
         "university": basic.university or education.school or "待补充",
+        "college": education.college or "待补充",
         "major": basic.major or education.major or "待补充",
-        "education": "\n".join(education_lines),
-        "projects": _format_experiences(resume_state.projects, "- 待补充"),
-        "internships": _format_experiences(
-            resume_state.internships,
-            f"- {resume_state.internship_note}" if resume_state.internship_note else "- 待补充",
+        "education_header": (
+            f"{education.school or basic.university or '待补充'} "
+            f"{education.college or '待补充'} "
+            f"{education.major or basic.major or '待补充'}专业  "
         ),
-        "skills": "\n".join(skill_lines),
+        "rank": education.gpa_or_rank or "待补充",
+        "english_level": education.english_level or "待补充",
+        "core_courses": _join_or_default(education.courses, separator="，"),
+        "tech_stack": _format_tech_stack(skills),
+        "projects": _format_experiences(resume_state.projects, "- 待补充", max_items=3),
         "awards": _format_awards(resume_state.awards),
-        "self_evaluation": resume_state.self_evaluation or "待补充",
+        "self_evaluation": _format_self_evaluation(resume_state.self_evaluation),
         "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
     }
 

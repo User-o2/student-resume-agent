@@ -44,7 +44,7 @@ class ResumeToolTestCase(unittest.TestCase):
         self.assertEqual(state.projects[0].results, ["完成 18 个接口"])
 
     def test_check_missing_fields_reports_project_quality_without_blocking_generation(self) -> None:
-        """验证项目质量追问不会阻塞已满足必填字段的简历生成。"""
+        """验证项目质量追问不会阻塞已满足模板必填板块的简历生成。"""
 
         state = collect_resume_info(
             ResumeState(),
@@ -53,13 +53,26 @@ class ResumeToolTestCase(unittest.TestCase):
                     "name": "李明",
                     "university": "浙江工业大学",
                     "major": "计算机科学与技术",
-                    "grade": "大三",
+                    "phone": "13800000001",
                     "email": "liming@example.com",
+                    "native_place": "山东省济南市",
                 },
-                "job_intention": {"target_position": "Python 后端实习"},
-                "education": {"courses": ["数据结构"]},
+                "job_intention": {
+                    "target_position": "Python 后端实习",
+                    "target_industry": "互联网",
+                    "expected_city": "杭州",
+                },
+                "education": {
+                    "school": "浙江工业大学",
+                    "college": "计算机学院",
+                    "major": "计算机科学与技术",
+                    "courses": ["数据结构"],
+                    "gpa_or_rank": "专业前 15%",
+                    "english_level": "CET-6 510",
+                },
                 "projects": [{"title": "图像识别项目", "raw_description": "我做过一个图像识别项目"}],
                 "skills": {"programming_languages": ["Python"]},
+                "awards": [{"name": "校级程序设计竞赛二等奖", "description": "团队排名前 10%"}],
                 "self_evaluation": "学习能力强，关注后端开发方向。",
             },
         )
@@ -69,7 +82,7 @@ class ResumeToolTestCase(unittest.TestCase):
         self.assertTrue(report["quality_questions"])
 
     def test_check_missing_fields_blocks_only_required_fields(self) -> None:
-        """验证只有必填字段缺失时才阻塞生成。"""
+        """验证新版模板所有必填板块缺失时会阻塞生成。"""
 
         state = collect_resume_info(
             ResumeState(),
@@ -86,9 +99,14 @@ class ResumeToolTestCase(unittest.TestCase):
         report = check_missing_fields(state)
 
         self.assertFalse(report["is_ready"])
-        self.assertIn("基本信息：年级", report["missing_fields"])
-        self.assertIn("基本信息：邮箱或手机号", report["missing_fields"])
-        self.assertIn("教育背景：主修课程或成绩排名", report["missing_fields"])
+        self.assertIn("个人信息：目标行业", report["missing_fields"])
+        self.assertIn("个人信息：电话", report["missing_fields"])
+        self.assertIn("个人信息：邮箱", report["missing_fields"])
+        self.assertIn("个人信息：籍贯", report["missing_fields"])
+        self.assertIn("教育背景：学院", report["missing_fields"])
+        self.assertIn("项目经历：至少 1 段项目经历", report["missing_fields"])
+        self.assertIn("竞赛获奖：至少 1 项竞赛、奖学金或证书", report["missing_fields"])
+        self.assertIn("自我评价：2-3 条个人优势", report["missing_fields"])
 
     def test_collect_resume_info_merges_untitled_project_supplements(self) -> None:
         """验证无标题项目补充会合并到上一段项目。"""
@@ -130,20 +148,34 @@ class ResumeToolTestCase(unittest.TestCase):
                     "name": "小明",
                     "university": "天津科技大学",
                     "major": "人工智能",
-                    "grade": "大三",
+                    "phone": "15208898345",
                     "email": "27485938@qq.com",
+                    "native_place": "天津市",
                 },
-                "job_intention": {"target_position": "Python 后端实习"},
-                "education": {"courses": ["机器学习"], "gpa_or_rank": "3/105"},
+                "job_intention": {
+                    "target_position": "Python 后端实习",
+                    "target_industry": "互联网",
+                    "expected_city": "杭州",
+                },
+                "education": {
+                    "school": "天津科技大学",
+                    "college": "人工智能学院",
+                    "major": "人工智能",
+                    "courses": ["机器学习"],
+                    "gpa_or_rank": "3/105",
+                    "english_level": "CET-6 500",
+                },
                 "projects": [
                     {},
                     {
+                        "title": "智能体路由系统",
                         "technologies": ["Flask", "Redis", "Celery"],
                         "responsibilities": ["负责智能体路由与对话管理模块"],
                         "results": ["接口吞吐量提升约 40%"],
                     },
                 ],
                 "skills": {"programming_languages": ["Python"]},
+                "awards": [{"name": "校级程序设计竞赛二等奖", "description": "团队排名前 10%"}],
                 "self_evaluation": "有较好的开发经验，认真学习新技术。",
             },
         )
@@ -163,10 +195,23 @@ class ResumeToolTestCase(unittest.TestCase):
                     "name": "李明",
                     "university": "浙江工业大学",
                     "major": "计算机科学与技术",
+                    "phone": "13800000001",
                     "email": "liming@example.com",
+                    "native_place": "山东省济南市",
                 },
-                "job_intention": {"target_position": "Python 后端实习", "expected_city": "杭州"},
-                "education": {"courses": ["数据结构"]},
+                "job_intention": {
+                    "target_position": "Python 后端实习",
+                    "target_industry": "互联网",
+                    "expected_city": "杭州",
+                },
+                "education": {
+                    "school": "浙江工业大学",
+                    "college": "计算机学院",
+                    "major": "计算机科学与技术",
+                    "courses": ["数据结构"],
+                    "gpa_or_rank": "专业前 15%",
+                    "english_level": "CET-6 510",
+                },
                 "projects": [
                     {
                         "title": "校园平台",
@@ -176,6 +221,7 @@ class ResumeToolTestCase(unittest.TestCase):
                     }
                 ],
                 "skills": {"programming_languages": ["Python"]},
+                "awards": [{"name": "校级程序设计竞赛二等奖", "description": "团队排名前 10%"}],
                 "self_evaluation": "具备后端开发实践经验。",
             },
         )
@@ -186,6 +232,7 @@ class ResumeToolTestCase(unittest.TestCase):
 
         self.assertIn("# 李明", result["markdown"])
         self.assertIn("校园平台", result["markdown"])
+        self.assertIn("## 竞赛获奖", result["markdown"])
         self.assertTrue(Path(result["output_path"]).name.endswith("resume.md"))
 
     def test_polish_experience_fallback_returns_bullets(self) -> None:

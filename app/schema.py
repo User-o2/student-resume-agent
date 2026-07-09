@@ -30,6 +30,7 @@ class BasicInfo(BaseModel):
     grade: str = ""
     phone: str = ""
     email: str = ""
+    native_place: str = ""
 
 
 class JobIntention(BaseModel):
@@ -44,9 +45,11 @@ class Education(BaseModel):
     """教育背景信息。"""
 
     school: str = ""
+    college: str = ""
     major: str = ""
     courses: list[str] = Field(default_factory=list)
     gpa_or_rank: str = ""
+    english_level: str = ""
 
 
 class Experience(BaseModel):
@@ -80,6 +83,7 @@ class Award(BaseModel):
     date: str = ""
     level: str = ""
     description: str = ""
+    highlights: list[str] = Field(default_factory=list)
 
 
 class ResumeState(BaseModel):
@@ -94,7 +98,7 @@ class ResumeState(BaseModel):
     skills: Skills = Field(default_factory=Skills)
     awards: list[Award] = Field(default_factory=list)
     self_evaluation: str = ""
-    current_stage: str = "job_intention"
+    current_stage: str = "personal_info"
     created_at: str = Field(default_factory=now_text)
     updated_at: str = Field(default_factory=now_text)
 

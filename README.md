@@ -4,11 +4,11 @@
 
 ## 功能范围
 
-- 多轮对话采集求职意向、基本信息、教育背景、项目经历、实习实践、技能奖项和自我评价。
+- 多轮对话采集个人信息、教育背景、项目经历、竞赛获奖和自我评价。
 - 使用结构化 `ResumeState` 保存简历状态，避免只依赖聊天历史。
 - 提供 4 个核心工具：`collect_resume_info`、`check_missing_fields`、`polish_experience`、`fill_resume_template`。
 - 注册 LangChain Tools，并通过 `create_agent` 构建 Agent。
-- 使用 Jinja2 模板生成 Markdown 简历，结果保存到 `outputs/`。
+- 使用新版 5 板块 Jinja2 模板生成 Markdown 简历，结果保存到 `outputs/`。
 - 内置两个学生案例，便于验收演示。
 
 ## 项目结构

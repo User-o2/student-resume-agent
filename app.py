@@ -27,7 +27,7 @@ def init_session_state() -> None:
         st.session_state.messages = [
             {
                 "role": "assistant",
-                "content": "你好，我会按模块帮你生成学生简历。请先告诉我目标岗位、目标行业或方向、期望城市。",
+                "content": "你好，我会按新版标准模板帮你生成学生简历。请先告诉我目标岗位、目标行业、期望城市，以及姓名、电话、邮箱和籍贯。",
             }
         ]
     if "resume_markdown" not in st.session_state:
@@ -68,7 +68,7 @@ def reset_session() -> None:
     st.session_state.messages = [
         {
             "role": "assistant",
-            "content": "已重置。请先告诉我目标岗位、目标行业或方向、期望城市。",
+            "content": "已重置。请先告诉我目标岗位、目标行业、期望城市，以及姓名、电话、邮箱和籍贯。",
         }
     ]
     st.session_state.resume_markdown = ""

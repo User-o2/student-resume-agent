@@ -292,10 +292,27 @@ def _extract_common_fields(text: str) -> dict[str, Any]:
     if name_match:
         basic["name"] = name_match.group(1).strip()
 
-    university_match = re.search(r"([\u4e00-\u9fa5A-Za-z]+(?:大学|学院))", text)
+    native_match = re.search(r"(?:籍贯|家乡)(?:是|为|[:：])?([\u4e00-\u9fa5]{2,20}(?:省|市|自治区|特别行政区)?[\u4e00-\u9fa5]{0,20}(?:市|县|区)?)", text)
+    if native_match:
+        basic["native_place"] = native_match.group(1).strip()
+
+    university_match = re.search(r"([\u4e00-\u9fa5A-Za-z]+大学)", text)
     if university_match:
         basic["university"] = university_match.group(1)
         education["school"] = university_match.group(1)
+
+    college_match = re.search(r"([\u4e00-\u9fa5A-Za-z]+学院)", text)
+    if college_match:
+        college = college_match.group(1)
+        if not university_match:
+            school_hint = re.search(r"(?:学校|院校|毕业院校)(?:是|为|[:：])?([\u4e00-\u9fa5A-Za-z]+学院)", text)
+            if school_hint:
+                basic["university"] = school_hint.group(1)
+                education["school"] = school_hint.group(1)
+            else:
+                education["college"] = college
+        elif college != university_match.group(1):
+            education["college"] = college
 
     major_match = re.search(r"专业(?:是|为|[:：])([\u4e00-\u9fa5A-Za-z0-9+\- ]{2,30})", text)
     if major_match:
@@ -324,6 +341,14 @@ def _extract_common_fields(text: str) -> dict[str, Any]:
     rank_match = re.search(r"(GPA[:：]?\s*[\d.]+|排名[:：]?\s*前?\s*\d+%?|绩点[:：]?\s*[\d.]+|成绩[:：]?\s*[^，,。]+)", text)
     if rank_match:
         education["gpa_or_rank"] = rank_match.group(1).strip()
+
+    english_matches = re.findall(
+        r"(?:CET-?\s*[46]\s*\d{0,3}|英语[四六四6]级\s*\d{0,3}|雅思\s*\d(?:\.\d)?|托福\s*\d+)",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if english_matches:
+        education["english_level"] = " | ".join(item.strip() for item in english_matches)
 
     if basic:
         update["basic_info"] = basic
@@ -375,7 +400,7 @@ def _extract_experience(text: str, category: str) -> dict[str, Any]:
     if category == "internships" and re.search(r"(没有|暂无|无).{0,6}(实习|实践)", text):
         return {"internship_note": "暂无正式实习经历，可使用课程实践、竞赛经历或项目经历补充。"}
 
-    title_match = re.search(r"([\u4e00-\u9fa5A-Za-z0-9]+(?:平台|系统|网站|小程序|项目|模型|算法|应用))", text)
+    title_match = re.search(r"([\u4e00-\u9fa5A-Za-z0-9]+(?:平台|系统|网站|小程序|项目|模型|算法|应用|课题|实践))", text)
     technologies = _find_keywords(text, TECH_KEYWORDS)
     result_clauses = [
         clause.strip()
@@ -441,7 +466,25 @@ def _extract_skills_and_awards(text: str) -> dict[str, Any]:
         if any(keyword in clause for keyword in ("奖", "证书", "竞赛", "奖学金"))
     ]
     if award_clauses:
-        update["awards"] = [{"name": clause[:50], "description": clause} for clause in award_clauses[:5]]
+        awards: list[dict[str, Any]] = []
+        for clause in award_clauses[:5]:
+            name_match = re.search(
+                r"([\u4e00-\u9fa5A-Za-z0-9 \-]+(?:竞赛|比赛|奖学金|证书|奖)[\u4e00-\u9fa5A-Za-z0-9 \-]*(?:一等奖|二等奖|三等奖|Top\s*\d+%|前\s*\d+%)?)",
+                clause,
+                flags=re.IGNORECASE,
+            )
+            date_match = re.search(r"(20\d{2}年?)", clause)
+            level_match = re.search(r"(国家级|省级|校级|院级|Top\s*\d+%|前\s*\d+%)", clause, flags=re.IGNORECASE)
+            awards.append(
+                {
+                    "name": (name_match.group(1).strip() if name_match else clause[:50]),
+                    "date": date_match.group(1) if date_match else "",
+                    "level": level_match.group(1) if level_match else "",
+                    "description": clause,
+                    "highlights": [clause],
+                }
+            )
+        update["awards"] = awards
     return update
 
 
@@ -459,15 +502,13 @@ def _heuristic_extract_update(text: str, state: ResumeState) -> dict[str, Any]:
     update = _extract_common_fields(text)
     stage = state.current_stage
 
-    if stage == "job_intention":
+    if stage in {"personal_info", "job_intention"}:
         update = _merge_patch(update, _extract_job_intention(text))
-    elif stage == "basic_education":
-        pass
+    elif stage in {"education", "basic_education"}:
+        update = _merge_patch(update, _extract_skills_and_awards(text))
     elif stage == "projects":
         update = _merge_patch(update, _extract_experience(text, "projects"))
-    elif stage == "internships":
-        update = _merge_patch(update, _extract_experience(text, "internships"))
-    elif stage == "skills_awards":
+    elif stage in {"awards", "skills_awards"}:
         update = _merge_patch(update, _extract_skills_and_awards(text))
     elif stage == "self_evaluation":
         update["self_evaluation"] = text.strip()
@@ -479,8 +520,10 @@ def _heuristic_extract_update(text: str, state: ResumeState) -> dict[str, Any]:
         update = _merge_patch(update, _extract_job_intention(text))
     if any(keyword in text for keyword in ("项目", "平台", "系统", "模型", "算法", "网站", "小程序", "应用")):
         update = _merge_patch(update, _extract_experience(text, "projects"))
-    if any(keyword in text for keyword in ("实习", "实践", "课题", "竞赛", "社团")) and stage not in {"job_intention"}:
-        update = _merge_patch(update, _extract_experience(text, "internships"))
+    if any(keyword in text for keyword in ("竞赛", "比赛", "获奖", "奖学金", "证书")):
+        update = _merge_patch(update, _extract_skills_and_awards(text))
+    if any(keyword in text for keyword in ("实践", "课题", "社团")) and stage not in {"personal_info", "job_intention"}:
+        update = _merge_patch(update, _extract_experience(text, "projects"))
     return _compact_patch(parse_json_object(json.dumps(update, ensure_ascii=False))) or {}
 
 
@@ -524,54 +567,18 @@ def _llm_extract_update(text: str, state: ResumeState, llm: BaseChatModel | None
         return {}
 
 
-def _has_basic_education_gap(state: ResumeState) -> bool:
-    """判断基本信息与教育背景是否仍有关键缺口。
-
-    Args:
-        state: 当前简历状态。
-
-    Returns:
-        是否存在缺口。
-    """
-
-    return any(
-        [
-            not state.basic_info.name,
-            not state.basic_info.university,
-            not state.basic_info.major,
-            not state.basic_info.grade,
-            not (state.basic_info.email or state.basic_info.phone),
-            not state.education.courses and not state.education.gpa_or_rank,
-        ]
-    )
-
-
-def _has_project_gap(report: dict[str, Any]) -> bool:
-    """判断项目经历是否仍有缺失或质量问题。
+def _has_missing_prefix(report: dict[str, Any], prefix: str) -> bool:
+    """判断缺失报告中是否存在指定板块缺口。
 
     Args:
         report: 缺失字段报告。
+        prefix: 缺失字段前缀。
 
     Returns:
-        是否存在项目问题。
+        是否存在指定板块缺失。
     """
 
-    missing = report.get("missing_fields", [])
-    quality = report.get("quality_questions", [])
-    return any("项目经历" in item for item in missing) or bool(quality)
-
-
-def _has_skill_gap(report: dict[str, Any]) -> bool:
-    """判断技能字段是否缺失。
-
-    Args:
-        report: 缺失字段报告。
-
-    Returns:
-        是否缺少技能信息。
-    """
-
-    return any("技能特长" in item for item in report.get("missing_fields", []))
+    return any(str(item).startswith(prefix) for item in report.get("missing_fields", []))
 
 
 def _sync_stage(state: ResumeState, previous_stage: str, report: dict[str, Any]) -> ResumeState:
@@ -586,10 +593,16 @@ def _sync_stage(state: ResumeState, previous_stage: str, report: dict[str, Any])
         更新阶段后的简历状态。
     """
 
-    if not state.job_intention.target_position:
-        state.current_stage = "job_intention"
-    elif _has_basic_education_gap(state):
-        state.current_stage = "basic_education"
+    if _has_missing_prefix(report, "个人信息："):
+        state.current_stage = "personal_info"
+    elif _has_missing_prefix(report, "教育背景："):
+        state.current_stage = "education"
+    elif _has_missing_prefix(report, "项目经历："):
+        state.current_stage = "projects"
+    elif _has_missing_prefix(report, "竞赛获奖："):
+        state.current_stage = "awards"
+    elif _has_missing_prefix(report, "自我评价："):
+        state.current_stage = "self_evaluation"
     else:
         state.current_stage = "ready"
     state.touch()
@@ -611,34 +624,32 @@ def build_followup_question(state: ResumeState, report: dict[str, Any]) -> str:
     optional_suggestions = report.get("optional_suggestions", [])
     quality_questions = report.get("quality_questions", [])
 
-    if state.current_stage == "job_intention":
-        return "请先补充目标岗位，这是生成简历的必要信息。也可以顺带说明目标行业或期望城市。"
-    if state.current_stage == "basic_education":
-        basic_missing = [
-            item.replace("基本信息：", "")
+    if state.current_stage in {"personal_info", "job_intention"}:
+        personal_missing = [
+            item.replace("个人信息：", "")
             for item in missing_fields
-            if item.startswith("基本信息：")
+            if item.startswith("个人信息：")
         ]
+        focus = "、".join(personal_missing[:3]) if personal_missing else "目标岗位、目标行业、期望城市、姓名、电话、邮箱、籍贯"
+        return f"请先补充个人信息：{focus}。这些信息会出现在简历顶部。"
+    if state.current_stage in {"education", "basic_education"}:
         education_missing = [
             item.replace("教育背景：", "")
             for item in missing_fields
             if item.startswith("教育背景：")
         ]
-        parts = basic_missing + education_missing
-        focus = "、".join(parts[:4]) if parts else "姓名、学校、专业、年级、联系方式、主修课程或成绩排名"
-        return f"请先补充必要信息：{focus}。这些信息完成后即可生成简历，其他项目、实习、奖项可以后续优化。"
+        focus = "、".join(education_missing[:3]) if education_missing else "学校、学院、专业、专业排名、英语水平、核心课程、技术栈"
+        return f"请补充教育背景：{focus}。"
     if state.current_stage == "projects":
         if quality_questions:
             return quality_questions[0]
-        return "请介绍 1 段项目经历，尽量包含项目名称、时间、技术栈、个人职责和项目成果。"
-    if state.current_stage == "internships":
-        return "请补充实习或实践经历；如果没有正式实习，可以说明暂无，或填写课程设计、竞赛实践、社团技术实践。"
-    if state.current_stage == "skills_awards":
-        return "请补充技能和荣誉奖项，包括编程语言、框架工具、专业技能、语言能力、竞赛奖项、奖学金或证书。"
+        return "请补充至少 1 段项目经历，包含项目名称和 2-3 条项目要点，建议覆盖技术方法、个人职责和量化结果。"
+    if state.current_stage in {"awards", "skills_awards"}:
+        return "请补充至少 1 项竞赛获奖、奖学金或证书，包含奖项名称和 1-2 条说明，例如负责内容、技术方法、排名或成果。"
     if state.current_stage == "self_evaluation":
-        return "请补充自我评价，重点说明个人优势、职业兴趣和发展方向，控制在 2-4 句话。"
+        return "请补充自我评价，建议 2-3 条，说明技术兴趣、实践能力、协作表达或职业方向。"
     if quality_questions:
-        return f"必要信息已完整，可以回复“生成简历”。如果想继续优化，建议先补充：{quality_questions[0]}"
+        return f"必要信息已完整，可以回复“生成简历”。如果想继续优化，建议补充：{quality_questions[0]}"
     if optional_suggestions:
         return f"必要信息已完整，可以回复“生成简历”。如果想继续优化，建议先补充：{optional_suggestions[0]}"
     return "必要信息已完整。回复“生成简历”即可输出 Markdown 简历，也可以继续补充需要强调的内容。"
@@ -706,7 +717,7 @@ class ResumeAgentService:
             return AgentTurnResult(
                 assistant_message=(
                     "你好，我会通过多轮对话帮你生成学生简历。"
-                    "请先告诉我这份简历的目标岗位、目标行业或方向、期望城市。"
+                    "请先告诉我这份简历的目标岗位、目标行业、期望城市，以及姓名、电话、邮箱和籍贯。"
                 ),
                 state=resume_state,
                 missing_report=report,
