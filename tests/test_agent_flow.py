@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import unittest
+import tempfile
+from pathlib import Path
 from unittest.mock import patch
 
 from app.agent import ResumeAgentService, ResumeTurnDecision
@@ -303,6 +305,45 @@ class ResumeAgentFlowTestCase(unittest.TestCase):
 
         self.assertNotIn("待补充", result.resume_markdown)
         self.assertEqual(result.resume_markdown.count("负责手写数字识别模型训练"), 1)
+
+    def test_optimize_existing_resume_offline_writes_markdown(self) -> None:
+        """验证已有 Markdown 简历可以离线解析并输出优化文件。"""
+
+        markdown = """# 张明
+
+- **求职意向**：人工智能算法实习生 | 互联网 | 北京
+- **电话**：13800001234
+- **邮箱**：zhangming@edu.cn
+- **籍贯**：江苏南京
+
+## 教育背景
+南京大学 人工智能学院 人工智能专业
+- **专业排名**：前15%
+- **英语水平**：CET-6 540
+- **核心课程**：机器学习，深度学习
+- **技术栈**：Python, PyTorch, Flask
+
+## 项目经历
+**图像识别系统**
+- 负责数据清洗
+- 准确率99.1%
+
+## 竞赛获奖
+**数学建模竞赛省级一等奖**
+- 团队排名前8%
+
+## 自我评价
+- 对计算机视觉有兴趣
+"""
+        service = ResumeAgentService(use_llm=False, use_agent_driver=False)
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            output_path = Path(tmp_dir) / "optimized.md"
+            result = service.optimize_existing_resume(markdown, output_path=output_path)
+
+        self.assertEqual(result.state.basic_info.name, "张明")
+        self.assertIn("图像识别系统", result.markdown)
+        self.assertTrue(Path(result.output_path).name.endswith("optimized.md"))
 
 
 if __name__ == "__main__":

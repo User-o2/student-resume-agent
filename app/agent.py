@@ -22,6 +22,8 @@ from app.config import AppConfig, load_config
 from app.prompts import (
     FINAL_POLISH_SYSTEM_PROMPT,
     FINAL_POLISH_USER_PROMPT,
+    IMPORT_RESUME_SYSTEM_PROMPT,
+    IMPORT_RESUME_USER_PROMPT,
     TURN_DECISION_SYSTEM_PROMPT,
     TURN_DECISION_USER_PROMPT,
 )
@@ -78,6 +80,14 @@ class ResumePolishResult(BaseModel):
     summary: str = Field(default="", description="本次清洗的简短说明。")
 
 
+class ResumeImportResult(BaseModel):
+    """LLM 对已有 Markdown 简历的结构化解析结果。"""
+
+    state: ResumeState = Field(description="从已有简历解析出的简历状态。")
+    summary: str = Field(default="", description="已有简历内容概述。")
+    optimization_notes: list[str] = Field(default_factory=list, description="解析阶段发现的可优化问题。")
+
+
 @dataclass
 class AgentTurnResult:
     """单轮对话处理结果。
@@ -96,6 +106,27 @@ class AgentTurnResult:
     missing_report: dict[str, Any]
     resume_markdown: str = ""
     output_path: str = ""
+    agent_trace: list[str] = field(default_factory=list)
+
+
+@dataclass
+class ExistingResumeOptimizationResult:
+    """已有简历解析与优化结果。
+
+    Args:
+        state: 优化后的结构化简历状态。
+        markdown: 优化后的 Markdown 简历。
+        output_path: 输出文件路径。
+        summary: 解析与优化摘要。
+        missing_report: 底线校验报告。
+        agent_trace: 执行轨迹。
+    """
+
+    state: ResumeState
+    markdown: str
+    output_path: str
+    summary: str
+    missing_report: dict[str, Any]
     agent_trace: list[str] = field(default_factory=list)
 
 
@@ -174,6 +205,27 @@ def _build_polish_agent(llm: BaseChatModel | None = None) -> Any | None:
     )
 
 
+def _build_import_agent(llm: BaseChatModel | None = None) -> Any | None:
+    """构建已有简历解析 Agent。
+
+    Args:
+        llm: 聊天模型实例。
+
+    Returns:
+        使用 `ResumeImportResult` 作为结构化输出的 Agent；模型不可用时返回 None。
+    """
+
+    if llm is None:
+        return None
+    return create_agent(
+        model=llm,
+        tools=[],
+        system_prompt=IMPORT_RESUME_SYSTEM_PROMPT,
+        response_format=ToolStrategy(ResumeImportResult),
+        checkpointer=InMemorySaver(),
+    )
+
+
 def _contains_generate_intent(text: str) -> bool:
     """判断用户是否明确要求生成简历。
 
@@ -240,6 +292,164 @@ def _split_items(text: str) -> list[str]:
 
     parts = re.split(r"[、,，;；/|\n]+", text)
     return [part.strip(" ：:。.") for part in parts if part.strip(" ：:。.")]
+
+
+def _strip_markdown_label(line: str, label: str) -> str:
+    """从 Markdown 列表行中去掉加粗标签。
+
+    Args:
+        line: Markdown 行文本。
+        label: 标签名称。
+
+    Returns:
+        标签后的字段内容。
+    """
+
+    pattern = rf"^\s*-\s*\*\*{re.escape(label)}\*\*[:：]\s*(.+?)\s*$"
+    match = re.search(pattern, line)
+    return match.group(1).strip() if match else ""
+
+
+def _extract_markdown_section(markdown_text: str, heading: str) -> str:
+    """提取指定二级标题下的 Markdown 内容。
+
+    Args:
+        markdown_text: 完整 Markdown 文本。
+        heading: 二级标题名称。
+
+    Returns:
+        标题下方内容；不存在时返回空字符串。
+    """
+
+    pattern = rf"^##\s+{re.escape(heading)}\s*$([\s\S]*?)(?=^##\s+|\Z)"
+    match = re.search(pattern, markdown_text, flags=re.MULTILINE)
+    return match.group(1).strip() if match else ""
+
+
+def _parse_titled_markdown_blocks(section_text: str) -> list[tuple[str, list[str]]]:
+    """解析由加粗标题和 bullet 组成的 Markdown 块。
+
+    Args:
+        section_text: Markdown 小节文本。
+
+    Returns:
+        标题与 bullet 列表。
+    """
+
+    blocks: list[tuple[str, list[str]]] = []
+    current_title = ""
+    current_items: list[str] = []
+    for raw_line in section_text.splitlines():
+        line = raw_line.strip()
+        title_match = re.fullmatch(r"\*\*(.+?)\*\*", line)
+        if title_match:
+            if current_title:
+                blocks.append((current_title, current_items))
+            current_title = title_match.group(1).strip()
+            current_items = []
+            continue
+        if line.startswith("-"):
+            current_items.append(line.lstrip("-").strip())
+    if current_title:
+        blocks.append((current_title, current_items))
+    return blocks
+
+
+def _parse_existing_resume_fallback(markdown_text: str) -> ResumeState:
+    """使用轻量规则解析标准 Markdown 简历。
+
+    Args:
+        markdown_text: 已有 Markdown 简历。
+
+    Returns:
+        解析出的简历状态。
+    """
+
+    state = ResumeState()
+    update: dict[str, Any] = {}
+    lines = [line.rstrip() for line in markdown_text.splitlines()]
+    title_match = re.search(r"^#\s+(.+?)\s*$", markdown_text, flags=re.MULTILINE)
+    if title_match:
+        update.setdefault("basic_info", {})["name"] = title_match.group(1).strip()
+
+    for line in lines:
+        job_text = _strip_markdown_label(line, "求职意向")
+        if job_text:
+            parts = [part.strip() for part in job_text.split("|")]
+            update["job_intention"] = {
+                "target_position": parts[0] if len(parts) > 0 else "",
+                "target_industry": parts[1] if len(parts) > 1 else "",
+                "expected_city": parts[2] if len(parts) > 2 else "",
+            }
+        for label, field_name in {"电话": "phone", "邮箱": "email", "籍贯": "native_place"}.items():
+            value = _strip_markdown_label(line, label)
+            if value:
+                update.setdefault("basic_info", {})[field_name] = value
+
+    education_text = _extract_markdown_section(markdown_text, "教育背景")
+    education_update: dict[str, Any] = {}
+    if education_text:
+        education_lines = [line.strip() for line in education_text.splitlines() if line.strip()]
+        header = next((line for line in education_lines if not line.startswith("-")), "")
+        header_match = re.match(r"(.+?)\s+(.+?)\s+(.+?)专业", header)
+        if header_match:
+            school, college, major = [item.strip() for item in header_match.groups()]
+            education_update.update({"school": school, "college": college, "major": major})
+            update.setdefault("basic_info", {}).update({"university": school, "major": major})
+        for line in education_lines:
+            for label, field_name in {
+                "专业排名": "gpa_or_rank",
+                "英语水平": "english_level",
+            }.items():
+                value = _strip_markdown_label(line, label)
+                if value:
+                    education_update[field_name] = value
+            courses = _strip_markdown_label(line, "核心课程")
+            if courses:
+                education_update["courses"] = _split_items(courses)
+            tech_stack = _strip_markdown_label(line, "技术栈")
+            if tech_stack:
+                skill_items = _split_items(tech_stack)
+                languages = {"Python", "Java", "C++", "JavaScript", "TypeScript", "Go"}
+                update["skills"] = {
+                    "programming_languages": [item for item in skill_items if item in languages],
+                    "tools": [item for item in skill_items if item not in languages],
+                }
+    if education_update:
+        update["education"] = education_update
+
+    project_blocks = _parse_titled_markdown_blocks(_extract_markdown_section(markdown_text, "项目经历"))
+    if project_blocks:
+        update["projects"] = [
+            {
+                "title": title,
+                "raw_description": "；".join(items),
+                "responsibilities": items,
+                "results": [item for item in items if re.search(r"\d|%|提升|准确率|响应|完成|排名|F1", item, flags=re.IGNORECASE)],
+            }
+            for title, items in project_blocks
+        ]
+
+    award_blocks = _parse_titled_markdown_blocks(_extract_markdown_section(markdown_text, "竞赛获奖"))
+    if award_blocks:
+        update["awards"] = [
+            {
+                "name": title,
+                "description": "；".join(items),
+                "highlights": items,
+            }
+            for title, items in award_blocks
+        ]
+
+    self_text = _extract_markdown_section(markdown_text, "自我评价")
+    if self_text:
+        update["self_evaluation"] = "；".join(
+            line.lstrip("-").strip()
+            for line in self_text.splitlines()
+            if line.strip().lstrip("-").strip()
+        )
+
+    return collect_resume_info(state, update)
 
 
 def _basic_fallback_extract(text: str, state: ResumeState) -> dict[str, Any]:
@@ -493,6 +703,7 @@ class ResumeAgentService:
         self.llm = build_chat_model(self.config) if use_llm else None
         self.turn_agent = build_langchain_agent(self.llm) if use_agent_driver else None
         self.polish_agent = _build_polish_agent(self.llm) if use_agent_driver else None
+        self.import_agent = _build_import_agent(self.llm) if use_agent_driver else None
         self.thread_id = str(uuid.uuid4())
         self.use_agent_driver = use_agent_driver
         self.recent_turns: list[dict[str, str]] = []
@@ -582,6 +793,56 @@ class ResumeAgentService:
         self._remember_turn(user_input, message)
         return AgentTurnResult(message, resume_state, report, agent_trace=trace)
 
+    def optimize_existing_resume(
+        self,
+        markdown_text: str,
+        output_path: Path | str | None = None,
+    ) -> ExistingResumeOptimizationResult:
+        """解析并优化已有 Markdown 简历。
+
+        Args:
+            markdown_text: 用户上传或传入的 Markdown 简历文本。
+            output_path: 可选的优化结果输出路径。
+
+        Returns:
+            已有简历优化结果。
+
+        Raises:
+            ValueError: 简历文本为空。
+        """
+
+        if not markdown_text.strip():
+            raise ValueError("已有简历内容为空，无法解析优化。")
+
+        trace: list[str] = []
+        import_result = self._import_resume_with_llm(markdown_text, trace)
+        if import_result is None:
+            parsed_state = _parse_existing_resume_fallback(markdown_text)
+            summary = "已使用规则兜底解析 Markdown 简历。"
+            trace.append("fallback: parse_existing_resume")
+        else:
+            parsed_state = import_result.state
+            summary = import_result.summary or "已使用 LLM 解析已有 Markdown 简历。"
+
+        parsed_report = check_missing_fields(parsed_state)
+        parsed_state = _sync_stage(parsed_state, parsed_report)
+        trace.append("调用工具：validate_resume_state")
+
+        optimized_state = self._polish_state_before_generation(parsed_state, trace)
+        optimized_report = check_missing_fields(optimized_state)
+        optimized_state = _sync_stage(optimized_state, optimized_report)
+        result = fill_resume_template(optimized_state, output_path=output_path)
+        trace.append("调用工具：fill_resume_template")
+
+        return ExistingResumeOptimizationResult(
+            state=optimized_state,
+            markdown=result["markdown"],
+            output_path=result["output_path"],
+            summary=summary,
+            missing_report=optimized_report,
+            agent_trace=trace,
+        )
+
     def _decide_with_llm(
         self,
         user_input: str,
@@ -645,6 +906,58 @@ class ResumeAgentService:
             return ResumeTurnDecision.model_validate(parsed) if parsed else None
         except Exception:
             return None
+
+    def _import_resume_with_llm(
+        self,
+        markdown_text: str,
+        trace: list[str],
+    ) -> ResumeImportResult | None:
+        """调用 LLM 解析已有 Markdown 简历。
+
+        Args:
+            markdown_text: 已有 Markdown 简历文本。
+            trace: 执行轨迹列表。
+
+        Returns:
+            解析结果；失败时返回 None。
+        """
+
+        if self.import_agent is not None:
+            prompt = IMPORT_RESUME_USER_PROMPT.format(resume_markdown=markdown_text)
+            try:
+                raw_result = self.import_agent.invoke(
+                    {"messages": [{"role": "user", "content": prompt}]},
+                    config={
+                        "configurable": {"thread_id": f"{self.thread_id}:import:{uuid.uuid4()}"},
+                        "recursion_limit": 6,
+                    },
+                )
+                structured = _extract_structured_response(raw_result, ResumeImportResult)
+                if isinstance(structured, ResumeImportResult):
+                    trace.append("LLM 结构化解析：ResumeImportResult")
+                    return structured
+            except Exception:
+                pass
+
+        if self.llm is None:
+            return None
+
+        prompt = ChatPromptTemplate.from_messages(
+            [
+                ("system", IMPORT_RESUME_SYSTEM_PROMPT),
+                ("human", IMPORT_RESUME_USER_PROMPT),
+            ]
+        )
+        try:
+            response = (prompt | self.llm).invoke({"resume_markdown": markdown_text})
+            content = getattr(response, "content", str(response))
+            parsed = parse_json_object(str(content))
+            if parsed:
+                trace.append("LLM JSON 解析：ResumeImportResult")
+                return ResumeImportResult.model_validate(parsed)
+        except Exception:
+            return None
+        return None
 
     def _fallback_decision(
         self,

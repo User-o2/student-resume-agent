@@ -70,6 +70,22 @@ FINAL_POLISH_USER_PROMPT = """## 待清洗的 ResumeState JSON
 
 请返回清洗后的完整 ResumeState。"""
 
+IMPORT_RESUME_SYSTEM_PROMPT = """你负责解析用户上传的已有 Markdown 简历，并转换为 ResumeState。
+
+要求：
+1. 只抽取简历中已经出现的信息，不要编造学校、岗位、成绩、项目指标、奖项等级或联系方式
+2. 保留项目经历中的技术方法、个人职责和量化成果，尽量写入 technologies、responsibilities、results、raw_description
+3. 如果已有简历中的项目 bullet 存在重复或短语堆叠，可以保留原始事实，但不要在解析阶段过度润色
+4. 奖项、证书、奖学金都写入 awards
+5. 自我评价保持原文核心含义
+6. 输出完整 ResumeImportResult 结构，不要输出 Markdown 简历
+"""
+
+IMPORT_RESUME_USER_PROMPT = """## 已有 Markdown 简历
+{resume_markdown}
+
+请解析为 ResumeState，用于后续统一模板改写。"""
+
 POLISH_EXPERIENCE_PROMPT = """你需要作为一个学生求职简历润色专家，把下面经历改写为 2-3 条适合学生简历的要点。
 
 目标岗位：{target_position}

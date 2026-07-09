@@ -194,6 +194,20 @@ def _normalize_resume_payload(payload: Any, key: str = "") -> Any:
     return payload
 
 
+def _normalize_major_text(value: Any) -> str:
+    """规整专业名称，避免模板重复追加“专业”。
+
+    Args:
+        value: 原始专业字段值。
+
+    Returns:
+        去掉末尾“专业”的专业名称。
+    """
+
+    text = str(value or "").strip()
+    return text.removesuffix("专业").strip()
+
+
 def _merge_dict(base: dict[str, Any], patch: Mapping[str, Any]) -> dict[str, Any]:
     """递归合并字典。
 
@@ -331,6 +345,10 @@ def collect_resume_info(
 
     if data["basic_info"].get("university") and not data["education"].get("school"):
         data["education"]["school"] = data["basic_info"]["university"]
+    if data["basic_info"].get("major"):
+        data["basic_info"]["major"] = _normalize_major_text(data["basic_info"]["major"])
+    if data["education"].get("major"):
+        data["education"]["major"] = _normalize_major_text(data["education"]["major"])
     if data["basic_info"].get("major") and not data["education"].get("major"):
         data["education"]["major"] = data["basic_info"]["major"]
     if data.get("skills", {}).get("languages") and not data["education"].get("english_level"):

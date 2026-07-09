@@ -168,6 +168,20 @@ class ResumeToolTestCase(unittest.TestCase):
         self.assertEqual(state.skills.programming_languages, ["Python", "C++"])
         self.assertEqual(state.skills.tools, ["PyTorch", "Linux", "Git"])
 
+    def test_collect_resume_info_normalizes_major_suffix(self) -> None:
+        """验证专业字段末尾的“专业”会被规整，避免模板重复。"""
+
+        state = collect_resume_info(
+            ResumeState(),
+            {
+                "basic_info": {"major": "人工智能专业"},
+                "education": {"major": "人工智能专业"},
+            },
+        )
+
+        self.assertEqual(state.basic_info.major, "人工智能")
+        self.assertEqual(state.education.major, "人工智能")
+
     def test_check_missing_fields_uses_best_meaningful_project(self) -> None:
         """验证空项目不会导致完整项目被误判为缺技术。"""
 

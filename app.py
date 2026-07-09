@@ -235,6 +235,62 @@ def process_pending_message(use_llm: bool) -> None:
     save_conversation_log("turn_complete")
 
 
+def render_existing_resume_upload(use_llm: bool) -> None:
+    """渲染已有简历上传与优化区域。
+
+    Args:
+        use_llm: 是否启用 LLM 解析与润色。
+
+    Returns:
+        None。
+    """
+
+    with st.expander("上传已有简历并优化", expanded=False):
+        uploaded_file = st.file_uploader(
+            "上传 Markdown 简历",
+            type=["md", "txt"],
+            accept_multiple_files=False,
+        )
+        if uploaded_file is None:
+            st.caption("支持上传已有 Markdown 简历，系统会解析、去重、润色并套用当前模板。")
+            return
+
+        st.caption(f"已选择：{uploaded_file.name}")
+        if not st.button("解析并优化已有简历", use_container_width=True):
+            return
+
+        try:
+            resume_text = uploaded_file.getvalue().decode("utf-8")
+        except UnicodeDecodeError:
+            st.error("文件编码无法识别，请上传 UTF-8 编码的 Markdown 文本。")
+            return
+
+        output_path = OUTPUTS_DIR / f"optimized_{Path(uploaded_file.name).stem}_{datetime.now():%Y%m%d_%H%M%S}.md"
+        service = get_agent_service(use_llm)
+        with st.spinner("正在解析并优化已有简历..."):
+            result = service.optimize_existing_resume(resume_text, output_path=output_path)
+
+        st.session_state.resume_state = result.state
+        st.session_state.resume_markdown = result.markdown
+        st.session_state.output_path = result.output_path
+        st.session_state.agent_trace = result.agent_trace
+        st.session_state.agent_trace_history.append(
+            {
+                "turn": len([message for message in st.session_state.messages if message["role"] == "user"]) + 1,
+                "user_input": f"上传已有简历：{uploaded_file.name}",
+                "trace": result.agent_trace,
+            }
+        )
+        st.session_state.messages.append(
+            {
+                "role": "assistant",
+                "content": f"已解析并优化已有简历：{result.output_path}\n\n{result.markdown}",
+            }
+        )
+        save_conversation_log("optimize_existing_resume")
+        st.rerun()
+
+
 def render_resume_result() -> None:
     """渲染生成后的 Markdown 下载区域。
 
@@ -282,6 +338,8 @@ def main() -> None:
     if st.session_state.pending_user_input:
         process_pending_message(use_llm)
         st.rerun()
+
+    render_existing_resume_upload(use_llm)
 
     user_input = st.chat_input("输入本轮补充的信息")
     if user_input:
