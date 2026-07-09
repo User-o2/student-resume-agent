@@ -5,18 +5,20 @@ from __future__ import annotations
 import json
 import re
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 import httpx
 from langchain.agents import create_agent
 from langchain_core.language_models.chat_models import BaseChatModel
+from langchain_core.messages import SystemMessage
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_openai import ChatOpenAI
 from langgraph.checkpoint.memory import InMemorySaver
 
 from app.config import AppConfig, load_config
-from app.prompts import AGENT_SYSTEM_PROMPT, EXTRACTION_SYSTEM_PROMPT
+from app.prompts import AGENT_DRIVER_PROMPT, AGENT_SYSTEM_PROMPT, EXTRACTION_SYSTEM_PROMPT
 from app.schema import ResumeState
 from app.tools import (
     RESUME_TOOLS,
@@ -30,6 +32,7 @@ from app.tools import (
 
 
 GENERATE_KEYWORDS = ("生成简历", "输出简历", "导出简历", "完成简历")
+GREETING_KEYWORDS = {"你好", "您好", "hi", "hello", "嗨", "在吗", "开始"}
 CITY_KEYWORDS = (
     "北京",
     "上海",
@@ -108,6 +111,7 @@ class AgentTurnResult:
     missing_report: dict[str, Any]
     resume_markdown: str = ""
     output_path: str = ""
+    agent_trace: list[str] = field(default_factory=list)
 
 
 def build_chat_model(config: AppConfig | None = None) -> BaseChatModel | None:
@@ -126,7 +130,7 @@ def build_chat_model(config: AppConfig | None = None) -> BaseChatModel | None:
 
     http_client = httpx.Client(
         verify=app_config.ssl_verify,
-        timeout=60,
+        timeout=30,
         trust_env=True,
     )
 
@@ -135,7 +139,7 @@ def build_chat_model(config: AppConfig | None = None) -> BaseChatModel | None:
         api_key=app_config.api_key,
         base_url=app_config.base_url,
         temperature=app_config.temperature,
-        timeout=60,
+        timeout=30,
         max_retries=2,
         extra_body={"enable_thinking": app_config.enable_thinking},
         http_client=http_client,
@@ -175,6 +179,20 @@ def _contains_generate_intent(text: str) -> bool:
 
     normalized = text.strip()
     return normalized in {"生成", "输出", "导出"} or any(keyword in normalized for keyword in GENERATE_KEYWORDS)
+
+
+def _is_greeting_only(text: str) -> bool:
+    """判断用户输入是否只是寒暄或开始对话。
+
+    Args:
+        text: 用户输入。
+
+    Returns:
+        是否为纯寒暄输入。
+    """
+
+    normalized = re.sub(r"[\s，,。.!！?？~～]+", "", text.strip().lower())
+    return normalized in GREETING_KEYWORDS
 
 
 def _find_keywords(text: str, keywords: tuple[str, ...]) -> list[str]:
@@ -479,7 +497,7 @@ def _llm_extract_update(text: str, state: ResumeState, llm: BaseChatModel | None
 
     prompt = ChatPromptTemplate.from_messages(
         [
-            ("system", EXTRACTION_SYSTEM_PROMPT),
+            SystemMessage(content=EXTRACTION_SYSTEM_PROMPT),
             (
                 "human",
                 "当前阶段：{stage}\n当前状态 JSON：{state_json}\n用户本轮输入：{user_input}",
@@ -613,12 +631,18 @@ def build_followup_question(state: ResumeState, report: dict[str, Any]) -> str:
 class ResumeAgentService:
     """面向 UI 和脚本的简历 Agent 服务。"""
 
-    def __init__(self, use_llm: bool = True, config: AppConfig | None = None) -> None:
+    def __init__(
+        self,
+        use_llm: bool = True,
+        config: AppConfig | None = None,
+        use_agent_driver: bool = True,
+    ) -> None:
         """初始化简历 Agent 服务。
 
         Args:
             use_llm: 是否启用 LLM 抽取与润色。
             config: 可选应用配置。
+            use_agent_driver: 是否使用 LangChain Agent 驱动主流程。
 
         Returns:
             None。
@@ -628,6 +652,7 @@ class ResumeAgentService:
         self.llm = build_chat_model(self.config) if use_llm else None
         self.langchain_agent = build_langchain_agent(self.llm)
         self.thread_id = str(uuid.uuid4())
+        self.use_agent_driver = use_agent_driver
 
     def extract_update(self, user_input: str, state: ResumeState) -> dict[str, Any]:
         """抽取用户本轮提供的简历字段更新。
@@ -660,6 +685,41 @@ class ResumeAgentService:
         """
 
         resume_state = coerce_resume_state(state)
+        if _is_greeting_only(user_input):
+            report = check_missing_fields(resume_state)
+            return AgentTurnResult(
+                assistant_message=(
+                    "你好，我会通过多轮对话帮你生成学生简历。"
+                    "请先告诉我这份简历的目标岗位、目标行业或方向、期望城市。"
+                ),
+                state=resume_state,
+                missing_report=report,
+                agent_trace=["fast_path: greeting"],
+            )
+
+        if self.use_agent_driver and self.langchain_agent is not None:
+            agent_result = self._handle_message_with_agent(user_input, resume_state)
+            if agent_result is not None:
+                return agent_result
+
+        return self._handle_message_controlled(user_input, resume_state)
+
+    def _handle_message_controlled(
+        self,
+        user_input: str,
+        state: ResumeState | dict[str, Any] | str | None,
+    ) -> AgentTurnResult:
+        """使用确定性编排处理单轮消息。
+
+        Args:
+            user_input: 用户输入。
+            state: 当前简历状态。
+
+        Returns:
+            单轮处理结果。
+        """
+
+        resume_state = coerce_resume_state(state)
         previous_stage = resume_state.current_stage
 
         if user_input.strip():
@@ -674,7 +734,7 @@ class ResumeAgentService:
             if not report["is_ready"]:
                 missing_text = "；".join(report["missing_fields"] + report["quality_questions"])
                 message = f"现在还不能生成完整简历，仍需补充：{missing_text}\n\n{build_followup_question(resume_state, report)}"
-                return AgentTurnResult(message, resume_state, report)
+                return AgentTurnResult(message, resume_state, report, agent_trace=["fallback: controlled_flow"])
 
             polished_state = polish_state_experiences(resume_state, self.llm)
             result = fill_resume_template(polished_state)
@@ -685,10 +745,153 @@ class ResumeAgentService:
                 missing_report=report,
                 resume_markdown=result["markdown"],
                 output_path=result["output_path"],
+                agent_trace=["fallback: controlled_flow"],
             )
 
         return AgentTurnResult(
             assistant_message=build_followup_question(resume_state, report),
             state=resume_state,
             missing_report=report,
+            agent_trace=["fallback: controlled_flow"],
         )
+
+    def _handle_message_with_agent(self, user_input: str, state: ResumeState) -> AgentTurnResult | None:
+        """使用 LangChain Agent 主导处理单轮消息。
+
+        Args:
+            user_input: 用户输入。
+            state: 当前简历状态。
+
+        Returns:
+            Agent 处理结果；失败时返回 None 以便兜底。
+        """
+
+        if self.langchain_agent is None:
+            return None
+
+        prompt = AGENT_DRIVER_PROMPT.format(
+            state_json=state.model_dump_json(ensure_ascii=False),
+            current_stage=state.current_stage,
+            user_input=user_input,
+        )
+
+        try:
+            raw_result = self.langchain_agent.invoke(
+                {"messages": [{"role": "user", "content": prompt}]},
+                config={
+                    "configurable": {"thread_id": f"{self.thread_id}:{uuid.uuid4()}"},
+                    "recursion_limit": 8,
+                },
+            )
+        except Exception:
+            return None
+
+        payload, tool_state, tool_report, tool_resume, trace = self._parse_agent_result(raw_result)
+        if not trace:
+            return None
+        payload_state = payload.get("state_json") if isinstance(payload, dict) else ""
+        updated_state = coerce_resume_state(payload_state or tool_state or state)
+        previous_stage = state.current_stage
+        report = tool_report or check_missing_fields(updated_state)
+        updated_state = _sync_stage(updated_state, previous_stage, report)
+        report = check_missing_fields(updated_state)
+
+        generated_markdown = ""
+        output_path = ""
+        if tool_resume:
+            generated_markdown = str(tool_resume.get("markdown", ""))
+            output_path = str(tool_resume.get("output_path", ""))
+        elif payload.get("resume_markdown"):
+            generated_markdown = str(payload.get("resume_markdown", ""))
+            output_path = str(payload.get("output_path", ""))
+
+        if output_path and not generated_markdown:
+            generated_markdown = self._read_generated_markdown(output_path)
+
+        if _contains_generate_intent(user_input) and report["is_ready"] and not output_path:
+            result = fill_resume_template(updated_state)
+            generated_markdown = result["markdown"]
+            output_path = result["output_path"]
+            trace.append("服务端补偿执行：fill_resume_template")
+
+        assistant_message = str(payload.get("assistant_message") or "").strip()
+        if not assistant_message:
+            assistant_message = build_followup_question(updated_state, report)
+
+        if generated_markdown and output_path:
+            assistant_message = f"已生成 Markdown 简历：{output_path}\n\n{generated_markdown}"
+
+        return AgentTurnResult(
+            assistant_message=assistant_message,
+            state=updated_state,
+            missing_report=report,
+            resume_markdown=generated_markdown,
+            output_path=output_path,
+            agent_trace=trace,
+        )
+
+    def _read_generated_markdown(self, output_path: str) -> str:
+        """从输出文件读取 Agent 生成的 Markdown 简历。
+
+        Args:
+            output_path: Markdown 文件路径。
+
+        Returns:
+            Markdown 文本；读取失败时返回空字符串。
+        """
+
+        try:
+            return Path(output_path).read_text(encoding="utf-8")
+        except OSError:
+            return ""
+
+    def _parse_agent_result(
+        self,
+        raw_result: dict[str, Any],
+    ) -> tuple[dict[str, Any], str, dict[str, Any], dict[str, Any], list[str]]:
+        """解析 LangChain Agent 输出、工具返回和调用轨迹。
+
+        Args:
+            raw_result: Agent invoke 返回值。
+
+        Returns:
+            最终 JSON、工具状态 JSON、缺失报告、生成结果、调用轨迹。
+        """
+
+        messages = raw_result.get("messages", []) if isinstance(raw_result, dict) else []
+        last_human_index = -1
+        for index, message in enumerate(messages):
+            if message.__class__.__name__ == "HumanMessage":
+                last_human_index = index
+        messages = messages[last_human_index + 1 :]
+        final_payload: dict[str, Any] = {}
+        tool_state = ""
+        tool_report: dict[str, Any] = {}
+        tool_resume: dict[str, Any] = {}
+        trace: list[str] = []
+
+        for message in messages:
+            tool_calls = getattr(message, "tool_calls", None) or []
+            for call in tool_calls:
+                name = call.get("name", "unknown_tool")
+                args = call.get("args", {})
+                trace.append(f"调用工具：{name}，参数：{list(args.keys())}")
+
+            content = getattr(message, "content", "")
+            if not content:
+                continue
+
+            parsed = parse_json_object(str(content))
+            if not parsed:
+                continue
+
+            if {"basic_info", "job_intention", "education"}.issubset(parsed.keys()):
+                tool_state = json.dumps(parsed, ensure_ascii=False)
+            elif {"missing_fields", "quality_questions", "is_ready"}.issubset(parsed.keys()):
+                tool_report = parsed
+            elif {"markdown", "output_path"}.issubset(parsed.keys()):
+                tool_resume = parsed
+            else:
+                final_payload = parsed
+
+        return final_payload, tool_state, tool_report, tool_resume, trace

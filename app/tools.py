@@ -152,6 +152,31 @@ def _record_key(record: Mapping[str, Any], fallback_key: str) -> str:
     return str(record.get(fallback_key) or record.get("title") or record.get("name") or "").strip()
 
 
+def _record_has_content(record: Mapping[str, Any]) -> bool:
+    """判断记录是否包含有效内容。
+
+    Args:
+        record: 记录字典。
+
+    Returns:
+        是否包含非空字段。
+    """
+
+    ignored_keys = {"created_at", "updated_at"}
+    for key, value in record.items():
+        if key in ignored_keys:
+            continue
+        if isinstance(value, Mapping):
+            if _record_has_content(value):
+                return True
+        elif isinstance(value, list):
+            if any(not _is_blank(item) for item in value):
+                return True
+        elif not _is_blank(value):
+            return True
+    return False
+
+
 def _merge_records(
     base: list[dict[str, Any]],
     patch: list[Mapping[str, Any]],
@@ -168,9 +193,9 @@ def _merge_records(
         合并后的记录列表。
     """
 
-    result = [dict(item) for item in base]
+    result = [dict(item) for item in base if isinstance(item, Mapping) and _record_has_content(item)]
     for item in patch:
-        if not isinstance(item, Mapping) or _is_blank(item):
+        if not isinstance(item, Mapping) or not _record_has_content(item):
             continue
         item_key = _record_key(item, fallback_key)
         match_index = None
@@ -178,6 +203,10 @@ def _merge_records(
             if item_key and _record_key(existed, fallback_key) == item_key:
                 match_index = index
                 break
+        if match_index is None and not item_key and fallback_key == "title" and result:
+            # 用户常以“补充：技术栈/职责/成果”的形式继续完善上一段项目，
+            # 这类信息通常没有标题，应合并到最近一段项目而不是新建空标题项目。
+            match_index = len(result) - 1
         if match_index is None:
             result.append(dict(item))
         else:
@@ -214,6 +243,9 @@ def collect_resume_info(
         patch = {item_key: item_value for item_key, item_value in patch.items() if item_key != "awards"}
 
     data = _merge_dict(data, patch)
+    data["projects"] = _merge_records([], data.get("projects", []), "title")
+    data["internships"] = _merge_records([], data.get("internships", []), "title")
+    data["awards"] = _merge_records([], data.get("awards", []), "name")
 
     if data["basic_info"].get("university") and not data["education"].get("school"):
         data["education"]["school"] = data["basic_info"]["university"]
@@ -267,6 +299,39 @@ def _experience_quality_questions(experience: Experience, category: str) -> list
     return questions
 
 
+def _experience_score(experience: Experience) -> int:
+    """计算经历信息完整度分数。
+
+    Args:
+        experience: 项目或实习经历。
+
+    Returns:
+        完整度分数。
+    """
+
+    score = 0
+    score += 2 if experience.title else 0
+    score += 3 if experience.technologies else 0
+    score += 3 if experience.responsibilities else 0
+    score += 3 if experience.results else 0
+    score += 1 if experience.raw_description else 0
+    return score
+
+
+def _meaningful_experiences(experiences: list[Experience]) -> list[Experience]:
+    """过滤空经历并按完整度降序返回。
+
+    Args:
+        experiences: 原始经历列表。
+
+    Returns:
+        有效经历列表。
+    """
+
+    meaningful = [experience for experience in experiences if _experience_score(experience) > 0]
+    return sorted(meaningful, key=_experience_score, reverse=True)
+
+
 def check_missing_fields(state: ResumeState | Mapping[str, Any] | str | None) -> dict[str, Any]:
     """检查必要字段缺失与经历质量问题。
 
@@ -296,10 +361,11 @@ def check_missing_fields(state: ResumeState | Mapping[str, Any] | str | None) ->
         missing_fields.append("基本信息：邮箱")
     if not resume_state.education.courses and not resume_state.education.gpa_or_rank:
         missing_fields.append("教育背景：主修课程或成绩排名")
-    if not resume_state.projects:
+    meaningful_projects = _meaningful_experiences(resume_state.projects)
+    if not meaningful_projects:
         missing_fields.append("项目经历：至少 1 段项目")
     else:
-        quality_questions.extend(_experience_quality_questions(resume_state.projects[0], "项目经历"))
+        quality_questions.extend(_experience_quality_questions(meaningful_projects[0], "项目经历"))
     if not _has_any_skill(resume_state):
         missing_fields.append("技能特长：至少 1 类技能")
     if not resume_state.self_evaluation:
@@ -331,6 +397,8 @@ def _clean_markdown_list(items: list[str]) -> list[str]:
     cleaned: list[str] = []
     for item in items:
         text = str(item).strip().lstrip("-").strip()
+        if re.fullmatch(r"(?:\d+[.、]\s*)?(技术栈|个人职责|项目成果|项目结果|成果)", text):
+            continue
         if text and text not in cleaned:
             cleaned.append(text)
     return cleaned
@@ -443,11 +511,12 @@ def _format_experiences(experiences: list[Experience], empty_text: str) -> str:
         Markdown 文本。
     """
 
-    if not experiences:
+    meaningful_experiences = _meaningful_experiences(experiences)
+    if not meaningful_experiences:
         return empty_text
 
     blocks: list[str] = []
-    for experience in experiences:
+    for experience in meaningful_experiences:
         title = experience.title or "未命名经历"
         time_range = " - ".join(part for part in [experience.start_date, experience.end_date] if part)
         meta_parts = [part for part in [experience.organization, experience.role, time_range] if part]
@@ -633,7 +702,15 @@ def fill_resume_template_tool(current_state_json: str) -> str:
     """
 
     result = fill_resume_template(current_state_json)
-    return json.dumps(result, ensure_ascii=False)
+    preview = "\n".join(result["markdown"].splitlines()[:12])
+    return json.dumps(
+        {
+            "markdown": "",
+            "output_path": result["output_path"],
+            "preview": preview,
+        },
+        ensure_ascii=False,
+    )
 
 
 RESUME_TOOLS = [

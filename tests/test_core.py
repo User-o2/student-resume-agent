@@ -67,6 +67,68 @@ class ResumeToolTestCase(unittest.TestCase):
         self.assertFalse(report["is_ready"])
         self.assertTrue(report["quality_questions"])
 
+    def test_collect_resume_info_merges_untitled_project_supplements(self) -> None:
+        """验证无标题项目补充会合并到上一段项目。"""
+
+        state = collect_resume_info(
+            ResumeState(),
+            {
+                "projects": [
+                    {
+                        "technologies": ["Flask"],
+                        "responsibilities": ["负责智能体路由模块"],
+                    }
+                ]
+            },
+        )
+        state = collect_resume_info(
+            state,
+            {
+                "projects": [
+                    {
+                        "technologies": ["Redis", "Celery"],
+                        "results": ["接口吞吐量提升约 40%"],
+                    }
+                ]
+            },
+        )
+
+        self.assertEqual(len(state.projects), 1)
+        self.assertEqual(state.projects[0].technologies, ["Flask", "Redis", "Celery"])
+        self.assertEqual(state.projects[0].results, ["接口吞吐量提升约 40%"])
+
+    def test_check_missing_fields_uses_best_meaningful_project(self) -> None:
+        """验证空项目不会导致完整项目被误判为缺技术。"""
+
+        state = collect_resume_info(
+            ResumeState(),
+            {
+                "basic_info": {
+                    "name": "小明",
+                    "university": "天津科技大学",
+                    "major": "人工智能",
+                    "email": "27485938@qq.com",
+                },
+                "job_intention": {"target_position": "Python 后端实习", "expected_city": "杭州"},
+                "education": {"courses": ["机器学习"], "gpa_or_rank": "3/105"},
+                "projects": [
+                    {},
+                    {
+                        "technologies": ["Flask", "Redis", "Celery"],
+                        "responsibilities": ["负责智能体路由与对话管理模块"],
+                        "results": ["接口吞吐量提升约 40%"],
+                    },
+                ],
+                "skills": {"programming_languages": ["Python"]},
+                "self_evaluation": "有较好的开发经验，认真学习新技术。",
+            },
+        )
+
+        report = check_missing_fields(state)
+
+        self.assertTrue(report["is_ready"])
+        self.assertEqual(report["quality_questions"], [])
+
     def test_fill_resume_template_writes_markdown(self) -> None:
         """验证模板填充可以写出 Markdown 文件。"""
 

@@ -55,6 +55,19 @@ source ~/miniconda3/bin/activate && conda activate langchain
 python scripts/check_llm_connection.py
 ```
 
+## Agent 主流程检查
+
+```bash
+source ~/miniconda3/bin/activate && conda activate langchain
+python scripts/check_agent_driver.py
+```
+
+该脚本会真实调用 LangChain Agent，快速检查它是否通过工具完成信息采集和缺失检查。若要额外验证完整 Markdown 生成，可以运行：
+
+```bash
+python scripts/check_agent_driver.py --full
+```
+
 ## 运行
 
 ```bash

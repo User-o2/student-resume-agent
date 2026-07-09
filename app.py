@@ -34,6 +34,10 @@ def init_session_state() -> None:
         st.session_state.resume_markdown = ""
     if "output_path" not in st.session_state:
         st.session_state.output_path = ""
+    if "agent_trace" not in st.session_state:
+        st.session_state.agent_trace = []
+    if "pending_user_input" not in st.session_state:
+        st.session_state.pending_user_input = ""
 
 
 @st.cache_resource(show_spinner=False)
@@ -69,6 +73,8 @@ def reset_session() -> None:
     ]
     st.session_state.resume_markdown = ""
     st.session_state.output_path = ""
+    st.session_state.agent_trace = []
+    st.session_state.pending_user_input = ""
 
 
 def render_sidebar(use_llm: bool) -> None:
@@ -100,6 +106,13 @@ def render_sidebar(use_llm: bool) -> None:
     with st.sidebar.expander("结构化状态", expanded=False):
         st.json(json.loads(state.model_dump_json()))
 
+    with st.sidebar.expander("Agent 工具轨迹", expanded=False):
+        if st.session_state.agent_trace:
+            for trace_item in st.session_state.agent_trace:
+                st.write(f"- {trace_item}")
+        else:
+            st.caption("暂无工具调用记录")
+
     if st.sidebar.button("重置会话", use_container_width=True):
         reset_session()
         st.rerun()
@@ -120,18 +133,35 @@ def render_chat_messages() -> None:
             st.markdown(message["content"])
 
 
-def submit_user_message(user_input: str, use_llm: bool) -> None:
-    """提交并处理用户消息。
+def enqueue_user_message(user_input: str) -> None:
+    """先记录用户消息并等待下一轮处理。
 
     Args:
         user_input: 用户输入。
-        use_llm: 是否启用 LLM。
 
     Returns:
         None。
     """
 
     st.session_state.messages.append({"role": "user", "content": user_input})
+    st.session_state.pending_user_input = user_input
+
+
+def process_pending_message(use_llm: bool) -> None:
+    """处理等待中的用户消息并追加 Agent 回复。
+
+    Args:
+        use_llm: 是否启用 LLM。
+
+    Returns:
+        None。
+    """
+
+    user_input = st.session_state.pending_user_input
+    if not user_input:
+        return
+
+    st.session_state.pending_user_input = ""
     service = get_agent_service(use_llm)
     with st.spinner("处理中..."):
         result = service.handle_message(user_input, st.session_state.resume_state)
@@ -140,6 +170,7 @@ def submit_user_message(user_input: str, use_llm: bool) -> None:
     if result.resume_markdown:
         st.session_state.resume_markdown = result.resume_markdown
         st.session_state.output_path = result.output_path
+    st.session_state.agent_trace = result.agent_trace
 
 
 def render_resume_result() -> None:
@@ -187,13 +218,17 @@ def main() -> None:
     st.title("学生简历生成智能体")
     render_chat_messages()
 
+    if st.session_state.pending_user_input:
+        process_pending_message(use_llm)
+        st.rerun()
+
     if st.sidebar.button("生成简历", type="primary", use_container_width=True):
-        submit_user_message("生成简历", use_llm)
+        enqueue_user_message("生成简历")
         st.rerun()
 
     user_input = st.chat_input("输入本轮补充的信息")
     if user_input:
-        submit_user_message(user_input, use_llm)
+        enqueue_user_message(user_input)
         st.rerun()
 
     render_resume_result()
