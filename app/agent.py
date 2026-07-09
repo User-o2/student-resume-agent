@@ -725,7 +725,7 @@ class ResumeAgentService:
                 pass
 
         trace.append("fallback: polish_state_experiences")
-        return polish_state_experiences(state)
+        return polish_state_experiences(state, self.llm, force=True)
 
     def _remember_turn(self, user_input: str, assistant_message: str) -> None:
         """记录最近对话摘要供下一轮 LLM 使用。

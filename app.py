@@ -56,6 +56,8 @@ def init_session_state() -> None:
         st.session_state.output_path = ""
     if "agent_trace" not in st.session_state:
         st.session_state.agent_trace = []
+    if "agent_trace_history" not in st.session_state:
+        st.session_state.agent_trace_history = []
     if "pending_user_input" not in st.session_state:
         st.session_state.pending_user_input = ""
     if "session_log_path" not in st.session_state:
@@ -80,6 +82,7 @@ def save_conversation_log(event: str = "turn_complete") -> None:
         "messages": st.session_state.messages,
         "resume_state": st.session_state.resume_state.model_dump(),
         "agent_trace": st.session_state.agent_trace,
+        "agent_trace_history": st.session_state.agent_trace_history,
         "output_path": st.session_state.output_path,
         "has_resume_markdown": bool(st.session_state.resume_markdown),
     }
@@ -120,6 +123,7 @@ def reset_session() -> None:
     st.session_state.resume_markdown = ""
     st.session_state.output_path = ""
     st.session_state.agent_trace = []
+    st.session_state.agent_trace_history = []
     st.session_state.pending_user_input = ""
     st.session_state.session_log_path = new_session_log_path()
     save_conversation_log("reset")
@@ -155,19 +159,17 @@ def render_sidebar(use_llm: bool) -> None:
         for item in report["optional_suggestions"][:3]:
             st.sidebar.write(f"- {item}")
 
-    with st.sidebar.expander("结构化状态", expanded=False):
+    with st.sidebar.expander("结构化状态", expanded=True):
         st.json(json.loads(state.model_dump_json()))
 
-    with st.sidebar.expander("Agent 工具轨迹", expanded=False):
-        if st.session_state.agent_trace:
-            for trace_item in st.session_state.agent_trace:
-                st.write(f"- {trace_item}")
+    with st.sidebar.expander("Agent 工具轨迹", expanded=True):
+        if st.session_state.agent_trace_history:
+            for turn_trace in st.session_state.agent_trace_history:
+                st.caption(f"第 {turn_trace['turn']} 轮：{turn_trace['user_input']}")
+                for trace_item in turn_trace["trace"]:
+                    st.write(f"- {trace_item}")
         else:
             st.caption("暂无工具调用记录")
-
-    if st.sidebar.button("重置会话", use_container_width=True):
-        reset_session()
-        st.rerun()
 
 
 def render_chat_messages() -> None:
@@ -223,6 +225,13 @@ def process_pending_message(use_llm: bool) -> None:
         st.session_state.resume_markdown = result.resume_markdown
         st.session_state.output_path = result.output_path
     st.session_state.agent_trace = result.agent_trace
+    st.session_state.agent_trace_history.append(
+        {
+            "turn": len([message for message in st.session_state.messages if message["role"] == "user"]),
+            "user_input": user_input,
+            "trace": result.agent_trace,
+        }
+    )
     save_conversation_log("turn_complete")
 
 
@@ -272,10 +281,6 @@ def main() -> None:
 
     if st.session_state.pending_user_input:
         process_pending_message(use_llm)
-        st.rerun()
-
-    if st.sidebar.button("生成简历", type="primary", use_container_width=True):
-        enqueue_user_message("生成简历")
         st.rerun()
 
     user_input = st.chat_input("输入本轮补充的信息")

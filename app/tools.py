@@ -638,12 +638,14 @@ def polish_experience(
 def polish_state_experiences(
     state: ResumeState | Mapping[str, Any] | str | None,
     llm: BaseChatModel | None = None,
+    force: bool = False,
 ) -> ResumeState:
     """批量润色状态中的项目与实习经历。
 
     Args:
         state: 当前简历状态。
         llm: 可选的聊天模型实例。
+        force: 是否覆盖已有的 polished_bullets。
 
     Returns:
         润色后的简历状态。
@@ -654,7 +656,7 @@ def polish_state_experiences(
 
     for group in (resume_state.projects, resume_state.internships):
         for experience in group:
-            if experience.polished_bullets:
+            if experience.polished_bullets and not force:
                 continue
             if llm is None and (experience.responsibilities or experience.results):
                 experience.polished_bullets = _clean_markdown_list(
