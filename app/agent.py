@@ -1,4 +1,4 @@
-"""学生简历生成智能体的编排逻辑。"""
+"""学生简历生成智能体的 LLM 主导编排逻辑。"""
 
 from __future__ import annotations
 
@@ -7,21 +7,26 @@ import re
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import httpx
 from langchain.agents import create_agent
+from langchain.agents.structured_output import ToolStrategy
 from langchain_core.language_models.chat_models import BaseChatModel
-from langchain_core.messages import SystemMessage
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_openai import ChatOpenAI
 from langgraph.checkpoint.memory import InMemorySaver
+from pydantic import BaseModel, Field
 
 from app.config import AppConfig, load_config
-from app.prompts import AGENT_DRIVER_PROMPT, AGENT_SYSTEM_PROMPT, EXTRACTION_SYSTEM_PROMPT
+from app.prompts import (
+    FINAL_POLISH_SYSTEM_PROMPT,
+    FINAL_POLISH_USER_PROMPT,
+    TURN_DECISION_SYSTEM_PROMPT,
+    TURN_DECISION_USER_PROMPT,
+)
 from app.schema import ResumeState
 from app.tools import (
-    RESUME_TOOLS,
     check_missing_fields,
     collect_resume_info,
     coerce_resume_state,
@@ -33,154 +38,44 @@ from app.tools import (
 
 GENERATE_KEYWORDS = ("生成简历", "输出简历", "导出简历", "完成简历")
 GREETING_KEYWORDS = {"你好", "您好", "hi", "hello", "嗨", "在吗", "开始"}
-CITY_KEYWORDS = (
-    "北京",
-    "上海",
-    "广州",
-    "深圳",
-    "杭州",
-    "南京",
-    "苏州",
-    "成都",
-    "武汉",
-    "西安",
-    "重庆",
-    "天津",
-    "长沙",
-    "厦门",
-    "青岛",
-    "远程",
-)
-ROLE_KEYWORDS = (
-    "人工智能算法实习生",
-    "Python 后端实习",
-    "后端开发实习",
-    "算法实习",
-    "机器学习实习",
-    "数据分析实习",
-    "前端开发实习",
-    "Java 后端实习",
-    "产品经理实习",
-    "测试开发实习",
-)
-TECH_KEYWORDS = (
-    "Python",
-    "Java",
-    "C++",
-    "JavaScript",
-    "TypeScript",
-    "Go",
-    "Flask",
-    "Django",
-    "FastAPI",
-    "Spring Boot",
-    "Vue",
-    "React",
-    "MySQL",
-    "PostgreSQL",
-    "Redis",
-    "Docker",
-    "Linux",
-    "PyTorch",
-    "TensorFlow",
-    "OpenCV",
-    "YOLO",
-    "ResNet",
-    "CNN",
-    "Pandas",
-    "NumPy",
-    "Git",
-    "Streamlit",
-)
-GRADE_KEYWORDS = ("大一", "大二", "大三", "大四", "研一", "研二", "研三", "本科", "硕士", "博士")
 
 
-def _has_personal_signal(text: str) -> bool:
-    """判断文本是否明确包含个人信息字段。
+class ResumeTurnDecision(BaseModel):
+    """LLM 对单轮用户输入的结构化决策。"""
 
-    Args:
-        text: 用户输入。
-
-    Returns:
-        是否包含个人信息信号。
-    """
-
-    return bool(re.search(r"(姓名|我叫|电话|手机号|邮箱|籍贯|家乡)", text))
-
-
-def _has_education_signal(text: str) -> bool:
-    """判断文本是否明确包含教育背景字段。
-
-    Args:
-        text: 用户输入。
-
-    Returns:
-        是否包含教育背景信号。
-    """
-
-    return bool(re.search(r"(学校|院校|毕业院校|学院|专业(?:是|为|[:：])|主修课程|核心课程|专业排名|成绩排名|GPA|英语水平|CET|英语[四六四6]级)", text))
-
-
-def _has_skill_signal(text: str) -> bool:
-    """判断文本是否明确包含技术栈或技能字段。
-
-    Args:
-        text: 用户输入。
-
-    Returns:
-        是否包含技能字段信号。
-    """
-
-    return bool(re.search(r"(技术栈|技能|熟悉|掌握|会使用|使用过|工具|框架|编程语言|开发语言)", text))
+    intent: Literal["collect_info", "generate_resume", "greeting", "chat"] = Field(
+        default="collect_info",
+        description="本轮用户意图。",
+    )
+    patch: dict[str, Any] = Field(
+        default_factory=dict,
+        description="从用户输入中抽取出的 ResumeState 增量补丁，只包含用户明确提供的信息。",
+    )
+    assistant_message: str = Field(
+        default="",
+        description="本轮要回复给用户的自然语言消息。",
+    )
+    followup_questions: list[str] = Field(
+        default_factory=list,
+        description="下一步建议追问的问题，每轮最多 3 个。",
+    )
+    ready_to_generate_reason: str = Field(
+        default="",
+        description="如果认为信息完整或用户请求生成，说明理由；不完整时留空。",
+    )
+    confidence: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=1.0,
+        description="LLM 对本轮抽取和回复规划的置信度。",
+    )
 
 
-def _has_award_signal(text: str, stage: str = "") -> bool:
-    """判断文本是否明确包含竞赛获奖字段。
+class ResumePolishResult(BaseModel):
+    """LLM 对生成前简历状态的结构化清洗结果。"""
 
-    Args:
-        text: 用户输入。
-        stage: 当前对话阶段。
-
-    Returns:
-        是否包含竞赛获奖信号。
-    """
-
-    if stage in {"awards", "skills_awards"}:
-        return True
-    return bool(re.search(r"(竞赛获奖|获奖|奖项|奖学金|证书|一等奖|二等奖|三等奖|Top\s*\d+%|前\s*\d+%)", text, flags=re.IGNORECASE))
-
-
-def _has_job_signal(text: str) -> bool:
-    """判断文本是否明确包含求职意向字段。
-
-    Args:
-        text: 用户输入。
-
-    Returns:
-        是否包含求职意向信号。
-    """
-
-    return bool(re.search(r"(求职意向|目标岗位|目标行业|期望城市|岗位|行业|城市|投递|应聘|申请|实习)", text))
-
-
-def _has_project_signal(text: str, stage: str = "") -> bool:
-    """判断文本是否明确包含项目经历字段。
-
-    Args:
-        text: 用户输入。
-        stage: 当前对话阶段。
-
-    Returns:
-        是否包含项目经历信号。
-    """
-
-    if stage == "projects":
-        return True
-    if _has_award_signal(text, stage):
-        return False
-    explicit_project = re.search(r"(项目经历|项目名称|项目[:：])", text)
-    product_like = re.search(r"([\u4e00-\u9fa5A-Za-z0-9]+(?:平台|系统|网站|小程序|应用))", text)
-    return bool(explicit_project or product_like)
+    state: ResumeState = Field(description="去重、润色后的简历状态。")
+    summary: str = Field(default="", description="本次清洗的简短说明。")
 
 
 @dataclass
@@ -193,6 +88,7 @@ class AgentTurnResult:
         missing_report: 缺失字段与质量检查报告。
         resume_markdown: 生成的 Markdown 简历内容。
         output_path: 生成文件路径。
+        agent_trace: 本轮关键步骤轨迹。
     """
 
     assistant_message: str
@@ -237,21 +133,43 @@ def build_chat_model(config: AppConfig | None = None) -> BaseChatModel | None:
 
 
 def build_langchain_agent(llm: BaseChatModel | None = None) -> Any | None:
-    """构建带工具和内存检查点的 LangChain Agent。
+    """构建结构化单轮决策 Agent。
 
     Args:
         llm: 聊天模型实例。
 
     Returns:
-        LangChain Agent；模型不可用时返回 None。
+        使用 `ResumeTurnDecision` 作为结构化输出的 Agent；模型不可用时返回 None。
     """
 
     if llm is None:
         return None
     return create_agent(
         model=llm,
-        tools=RESUME_TOOLS,
-        system_prompt=AGENT_SYSTEM_PROMPT,
+        tools=[],
+        system_prompt=TURN_DECISION_SYSTEM_PROMPT,
+        response_format=ToolStrategy(ResumeTurnDecision),
+        checkpointer=InMemorySaver(),
+    )
+
+
+def _build_polish_agent(llm: BaseChatModel | None = None) -> Any | None:
+    """构建生成前简历清洗 Agent。
+
+    Args:
+        llm: 聊天模型实例。
+
+    Returns:
+        使用 `ResumePolishResult` 作为结构化输出的 Agent；模型不可用时返回 None。
+    """
+
+    if llm is None:
+        return None
+    return create_agent(
+        model=llm,
+        tools=[],
+        system_prompt=FINAL_POLISH_SYSTEM_PROMPT,
+        response_format=ToolStrategy(ResumePolishResult),
         checkpointer=InMemorySaver(),
     )
 
@@ -266,8 +184,10 @@ def _contains_generate_intent(text: str) -> bool:
         是否为生成意图。
     """
 
-    normalized = text.strip()
-    return normalized in {"生成", "输出", "导出"} or any(keyword in normalized for keyword in GENERATE_KEYWORDS)
+    normalized = re.sub(r"[\s，,。.!！?？~～]+", "", text.strip().lower())
+    return normalized in {"生成", "输出", "导出", "完成", "生成简历", "输出简历", "导出简历", "完成简历"} or any(
+        keyword.lower() in text.lower() for keyword in GENERATE_KEYWORDS
+    )
 
 
 def _is_greeting_only(text: str) -> bool:
@@ -284,52 +204,6 @@ def _is_greeting_only(text: str) -> bool:
     return normalized in GREETING_KEYWORDS
 
 
-def _find_keywords(text: str, keywords: tuple[str, ...]) -> list[str]:
-    """从文本中匹配关键词。
-
-    Args:
-        text: 用户输入文本。
-        keywords: 候选关键词。
-
-    Returns:
-        命中的关键词列表。
-    """
-
-    lower_text = text.lower()
-    return [keyword for keyword in keywords if keyword.lower() in lower_text]
-
-
-def _split_cn_items(text: str) -> list[str]:
-    """按常见中文分隔符拆分条目。
-
-    Args:
-        text: 原始文本。
-
-    Returns:
-        清洗后的条目列表。
-    """
-
-    parts = re.split(r"[、,，;；/|\n]+", text)
-    return [part.strip(" ：:。.") for part in parts if part.strip(" ：:。.")]
-
-
-def _merge_patch(base: dict[str, Any], patch: dict[str, Any]) -> dict[str, Any]:
-    """合并两个抽取补丁。
-
-    Args:
-        base: 已有补丁。
-        patch: 新补丁。
-
-    Returns:
-        合并后的补丁。
-    """
-
-    if not patch:
-        return base
-    merged = collect_resume_info(base, patch).model_dump()
-    return _compact_patch(merged)
-
-
 def _compact_patch(value: Any, key: str = "") -> Any:
     """移除补丁中的空值和状态元数据。
 
@@ -343,11 +217,10 @@ def _compact_patch(value: Any, key: str = "") -> Any:
 
     if key in {"current_stage", "created_at", "updated_at"}:
         return None
+    if isinstance(value, BaseModel):
+        return _compact_patch(value.model_dump(), key)
     if isinstance(value, dict):
-        compacted = {
-            item_key: _compact_patch(item_value, item_key)
-            for item_key, item_value in value.items()
-        }
+        compacted = {item_key: _compact_patch(item_value, item_key) for item_key, item_value in value.items()}
         return {item_key: item_value for item_key, item_value in compacted.items() if item_value not in (None, "", [], {})}
     if isinstance(value, list):
         compacted_list = [_compact_patch(item) for item in value]
@@ -355,19 +228,36 @@ def _compact_patch(value: Any, key: str = "") -> Any:
     return value if value not in (None, "", [], {}) else None
 
 
-def _extract_common_fields(text: str) -> dict[str, Any]:
-    """抽取不依赖当前阶段的通用字段。
+def _split_items(text: str) -> list[str]:
+    """按常见中英文分隔符拆分条目。
+
+    Args:
+        text: 原始文本。
+
+    Returns:
+        清洗后的条目列表。
+    """
+
+    parts = re.split(r"[、,，;；/|\n]+", text)
+    return [part.strip(" ：:。.") for part in parts if part.strip(" ：:。.")]
+
+
+def _basic_fallback_extract(text: str, state: ResumeState) -> dict[str, Any]:
+    """在 LLM 不可用时执行最小规则兜底抽取。
 
     Args:
         text: 用户输入。
+        state: 当前简历状态。
 
     Returns:
-        字段更新字典。
+        ResumeState 增量补丁。
     """
 
     update: dict[str, Any] = {}
     basic: dict[str, Any] = {}
+    job: dict[str, Any] = {}
     education: dict[str, Any] = {}
+    skills: dict[str, Any] = {}
 
     email_match = re.search(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+", text)
     if email_match:
@@ -377,396 +267,136 @@ def _extract_common_fields(text: str) -> dict[str, Any]:
     if phone_match:
         basic["phone"] = phone_match.group(0)
 
-    name_match = re.search(r"(?:我叫|姓名(?:是|为|[:：])?)([\u4e00-\u9fa5A-Za-z·]{2,20})", text)
-    if name_match:
-        basic["name"] = name_match.group(1).strip()
+    labeled_patterns = {
+        "name": r"(?:姓名|我叫)[:：]?\s*([\u4e00-\u9fa5A-Za-z·]{2,20})",
+        "native_place": r"(?:籍贯|家乡)[:：]?\s*([^，,。；;\n]+)",
+        "target_position": r"目标岗位[:：]?\s*([^，,。；;\n]+)",
+        "target_industry": r"目标行业[:：]?\s*([^，,。；;\n]+)",
+        "expected_city": r"期望城市[:：]?\s*([^，,。；;\n]+)",
+        "school": r"(?:学校|院校)[:：]?\s*([^，,。；;\n]+)",
+        "college": r"学院[:：]?\s*([^，,。；;\n]+)",
+        "major": r"专业(?:是|为|[:：])\s*([^，,。；;\n]+)",
+        "gpa_or_rank": r"(?:专业排名|成绩排名|排名|GPA|绩点)[:：]?\s*([^，,。；;\n]+)",
+        "english_level": r"(?:英语水平|英语)[:：]?\s*([^，,。；;\n]+)",
+    }
+    matched: dict[str, str] = {}
+    for key, pattern in labeled_patterns.items():
+        match = re.search(pattern, text, flags=re.IGNORECASE)
+        if match:
+            matched[key] = match.group(1).strip()
 
-    native_match = re.search(r"(?:籍贯|家乡)(?:是|为|[:：])?([\u4e00-\u9fa5]{2,20}(?:省|市|自治区|特别行政区)?[\u4e00-\u9fa5]{0,20}(?:市|县|区)?)", text)
-    if native_match:
-        basic["native_place"] = native_match.group(1).strip()
+    for key in ("name", "native_place"):
+        if matched.get(key):
+            basic[key] = matched[key]
+    if matched.get("major"):
+        basic["major"] = matched["major"]
+    if matched.get("school"):
+        basic["university"] = matched["school"]
 
-    university_match = re.search(r"([\u4e00-\u9fa5A-Za-z]+大学)(?!生)", text)
-    if university_match:
-        basic["university"] = university_match.group(1)
-        education["school"] = university_match.group(1)
+    for key in ("target_position", "target_industry", "expected_city"):
+        if matched.get(key):
+            job[key] = matched[key]
 
-    college_match = re.search(r"([\u4e00-\u9fa5A-Za-z]+学院)", text)
-    if college_match:
-        college = college_match.group(1)
-        if not university_match:
-            school_hint = re.search(r"(?:学校|院校|毕业院校)(?:是|为|[:：])?([\u4e00-\u9fa5A-Za-z]+学院)", text)
-            if school_hint:
-                basic["university"] = school_hint.group(1)
-                education["school"] = school_hint.group(1)
-            else:
-                education["college"] = college
-        elif college != university_match.group(1):
-            education["college"] = college
-
-    major_match = re.search(r"专业(?:是|为|[:：])([\u4e00-\u9fa5A-Za-z0-9+\- ]{2,30})", text)
-    if major_match:
-        major = major_match.group(1).strip(" ，,。.")
-        basic["major"] = major
-        education["major"] = major
-    else:
-        suffix_major_match = re.search(r"([\u4e00-\u9fa5A-Za-z0-9+\-]{2,30}专业)(?!前|排名|综合)", text)
-        if suffix_major_match:
-            major = suffix_major_match.group(1).removesuffix("专业")
-            university = basic.get("university")
-            if university and major.startswith(university):
-                major = major[len(university) :]
-            basic["major"] = major
-            education["major"] = major
-
-    for grade in GRADE_KEYWORDS:
-        if grade in text:
-            basic["grade"] = grade
-            break
-
-    course_match = re.search(r"(?:主修课程|核心课程|课程)(?:包括|有|是|为|[:：])?(.+)", text)
-    if course_match:
-        course_text = re.split(r"(?:技术栈|技能|专业排名|成绩排名|英语水平)[:：]?", course_match.group(1))[0]
-        education["courses"] = _split_cn_items(course_text)[:8]
-
-    rank_match = re.search(
-        r"(?:专业排名|成绩排名|排名)[:：]?\s*([^。；;\n]+?)(?=\s*(?:英语水平|英语[四六四6]级|CET|核心课程|主修课程|技术栈|技能)[:：]?|$)",
-        text,
-    )
-    if rank_match:
-        education["gpa_or_rank"] = rank_match.group(1).strip(" ，,。；;")
-    else:
-        gpa_match = re.search(r"(GPA[:：]?\s*[\d.]+(?:/\d(?:\.\d)?)?|绩点[:：]?\s*[\d.]+)", text)
-        if gpa_match:
-            education["gpa_or_rank"] = gpa_match.group(1).strip()
-
-    english_matches = re.findall(
-        r"(?:CET-?\s*[46]\s*\d{0,3}分?|英语[四六四6]级\s*\d{0,3}分?|雅思\s*\d(?:\.\d)?|托福\s*\d+)",
-        text,
-        flags=re.IGNORECASE,
-    )
-    if english_matches:
-        education["english_level"] = " | ".join(item.strip() for item in english_matches)
-
-    if basic:
-        update["basic_info"] = basic
-    if education:
-        update["education"] = education
-    return update
-
-
-def _extract_job_intention(text: str) -> dict[str, Any]:
-    """抽取求职意向字段。
-
-    Args:
-        text: 用户输入。
-
-    Returns:
-        求职意向更新字典。
-    """
-
-    job: dict[str, Any] = {}
-    cities = _find_keywords(text, CITY_KEYWORDS)
-    roles = _find_keywords(text, ROLE_KEYWORDS)
-
-    labeled_position = re.search(r"目标岗位[:：]?\s*([^。；;\n]+?)(?=\s*目标行业[:：]|期望城市[:：]|$)", text)
-    labeled_industry = re.search(r"目标行业[:：]?\s*([^。；;\n]+?)(?=\s*目标岗位[:：]|期望城市[:：]|$)", text)
-    labeled_city = re.search(r"期望城市[:：]?\s*([^。；;\n]+?)(?=\s*目标岗位[:：]|目标行业[:：]|$)", text)
-
-    if labeled_position:
-        job["target_position"] = labeled_position.group(1).strip(" ，,。；;")
-    elif roles:
-        job["target_position"] = roles[0]
-    else:
-        position_match = re.search(r"(?:投递|投|应聘|申请|想做|目标岗位(?:是|为)?)([^，,。；;]+)", text)
+    if not job.get("target_position"):
+        position_match = re.search(r"(?:投递|应聘|申请|想投|想做)\s*([^，,。；;\n]+)", text)
         if position_match:
             job["target_position"] = position_match.group(1).strip()
 
-    if labeled_city:
-        job["expected_city"] = labeled_city.group(1).strip(" ，,。；;")
-    elif cities:
-        job["expected_city"] = cities[0]
-    if labeled_industry:
-        job["target_industry"] = labeled_industry.group(1).strip(" ，,。；;")
-    else:
-        industry_match = re.search(r"(互联网|人工智能|金融科技|教育科技|制造业|游戏|电商)", text)
-        if industry_match:
-            job["target_industry"] = industry_match.group(1)
-    return {"job_intention": job} if job else {}
+    for key in ("school", "college", "major", "gpa_or_rank", "english_level"):
+        if matched.get(key):
+            education[key] = matched[key]
 
+    university_match = re.search(r"([\u4e00-\u9fa5A-Za-z]+大学)(?!生)", text)
+    if university_match and not education.get("school") and not (state.education.school or state.basic_info.university):
+        education["school"] = university_match.group(1)
+        basic.setdefault("university", university_match.group(1))
 
-def _extract_experience(text: str, category: str) -> dict[str, Any]:
-    """抽取项目或实习实践经历。
+    college_match = re.search(r"([\u4e00-\u9fa5A-Za-z]+学院)", text)
+    if college_match and not education.get("college"):
+        education["college"] = college_match.group(1)
 
-    Args:
-        text: 用户输入。
-        category: `projects` 或 `internships`。
+    course_match = re.search(r"(?:主修课程|核心课程|课程)[:：]?\s*([^。；;\n]+)", text)
+    if course_match:
+        education["courses"] = _split_items(course_match.group(1))[:8]
 
-    Returns:
-        经历更新字典。
-    """
+    english_matches = re.findall(r"(?:CET-?\s*[46]\s*\d{0,3}分?|英语[四六四6]级\s*\d{0,3}分?)", text, flags=re.IGNORECASE)
+    if english_matches and not education.get("english_level"):
+        education["english_level"] = " | ".join(item.strip() for item in english_matches)
 
-    if category == "internships" and re.search(r"(没有|暂无|无).{0,6}(实习|实践)", text):
-        return {"internship_note": "暂无正式实习经历，可使用课程实践、竞赛经历或项目经历补充。"}
+    tech_match = re.search(r"(?:技术栈|技能|熟悉|掌握)[:：]?\s*([^。；;\n]+)", text, flags=re.IGNORECASE)
+    if tech_match:
+        skill_items = _split_items(tech_match.group(1))[:12]
+        languages = {"Python", "Java", "C++", "JavaScript", "TypeScript", "Go"}
+        skills["programming_languages"] = [item for item in skill_items if item in languages]
+        skills["tools"] = [item for item in skill_items if item not in languages]
 
-    title_match = re.search(r"([\u4e00-\u9fa5A-Za-z0-9]+(?:平台|系统|网站|小程序|项目|模型|算法|应用|课题|实践))", text)
-    technologies = _find_keywords(text, TECH_KEYWORDS)
-    result_clauses = [
-        clause.strip()
-        for clause in re.split(r"[。；;\n]", text)
-        if re.search(r"\d|%|提升|准确率|召回率|上线|用户|排名|效率|降低|优化", clause)
-    ]
-    responsibility_clauses = [
-        clause.strip()
-        for clause in re.split(r"[。；;\n]", text)
-        if re.search(r"负责|开发|实现|设计|搭建|完成|参与|优化|训练|部署", clause)
-    ]
-
-    item: dict[str, Any] = {
-        "title": title_match.group(1) if title_match else "",
-        "technologies": technologies,
-        "responsibilities": responsibility_clauses[:4] or [text.strip()],
-        "results": result_clauses[:3],
-        "raw_description": text.strip(),
-    }
-
-    if category == "internships":
-        org_match = re.search(r"在([^，,。；;]{2,30})(?:担任|做|实习|实践)", text)
-        role_match = re.search(r"(?:担任|岗位(?:是|为)?)([^，,。；;]{2,20})", text)
-        if org_match:
-            item["organization"] = org_match.group(1).strip()
-        if role_match:
-            item["role"] = role_match.group(1).strip()
-
-    return {category: [item]}
-
-
-def _extract_skills_and_awards(text: str) -> dict[str, Any]:
-    """抽取技能与荣誉奖项。
-
-    Args:
-        text: 用户输入。
-
-    Returns:
-        技能和奖项更新字典。
-    """
-
-    update: dict[str, Any] = {}
-    technologies = _find_keywords(text, TECH_KEYWORDS)
-    programming = [item for item in technologies if item in {"Python", "Java", "C++", "JavaScript", "TypeScript", "Go"}]
-    tools = [item for item in technologies if item not in set(programming)]
-
-    skills: dict[str, Any] = {}
-    if _has_skill_signal(text):
-        if programming:
-            skills["programming_languages"] = programming
-        if tools:
-            skills["tools"] = tools
-        skill_match = re.search(r"(?:技术栈|技能|专业技能)(?:包括|有|是|为|[:：])?(.+)", text)
-        if skill_match:
-            skill_text = re.split(r"(?:竞赛|获奖|奖学金|证书|项目经历|自我评价)[:：]?", skill_match.group(1))[0]
-            professional_items = [
-                item
-                for item in _split_cn_items(skill_text)[:10]
-                if item not in set(programming + tools)
-                and not re.search(r"(专业排名|英语水平|核心课程|主修课程|GPA)", item)
-            ]
-            if professional_items:
-                skills["professional_skills"] = professional_items
-    language_match = re.search(r"(英语[四六六四]级|CET-?[46]|雅思\d(?:\.\d)?|托福\d+)", text, flags=re.IGNORECASE)
-    if language_match:
-        skills["languages"] = [language_match.group(1)]
-    if skills:
-        update["skills"] = skills
-
-    award_clauses = [
-        clause.strip()
-        for clause in re.split(r"[。；;\n]", text)
-        if any(keyword in clause for keyword in ("奖", "证书", "竞赛", "奖学金"))
-    ]
-    if award_clauses:
-        awards: list[dict[str, Any]] = []
-        for clause in award_clauses[:5]:
-            name_match = re.search(
-                r"([\u4e00-\u9fa5A-Za-z0-9 \-]+(?:竞赛|比赛|奖学金|证书|奖)[\u4e00-\u9fa5A-Za-z0-9 \-]*(?:一等奖|二等奖|三等奖|Top\s*\d+%|前\s*\d+%)?)",
-                clause,
-                flags=re.IGNORECASE,
-            )
-            date_match = re.search(r"(20\d{2}年?)", clause)
-            level_match = re.search(r"(国家级|省级|校级|院级|Top\s*\d+%|前\s*\d+%)", clause, flags=re.IGNORECASE)
-            awards.append(
-                {
-                    "name": (name_match.group(1).strip() if name_match else clause[:50]),
-                    "date": date_match.group(1) if date_match else "",
-                    "level": level_match.group(1) if level_match else "",
-                    "description": clause,
-                    "highlights": [clause],
-                }
-            )
-        update["awards"] = awards
-    return update
-
-
-def _heuristic_extract_update(text: str, state: ResumeState) -> dict[str, Any]:
-    """在 LLM 不可用时根据当前阶段进行规则抽取。
-
-    Args:
-        text: 用户输入。
-        state: 当前简历状态。
-
-    Returns:
-        字段更新字典。
-    """
-
-    update = _extract_common_fields(text)
-    stage = state.current_stage
-
-    if stage in {"personal_info", "job_intention"}:
-        if _has_job_signal(text):
-            update = _merge_patch(update, _extract_job_intention(text))
-    elif stage in {"education", "basic_education"}:
-        if _has_skill_signal(text):
-            update = _merge_patch(update, _extract_skills_and_awards(text))
-    elif stage == "projects":
-        update = _merge_patch(update, _extract_experience(text, "projects"))
-    elif stage in {"awards", "skills_awards"}:
-        update = _merge_patch(update, _extract_skills_and_awards(text))
-    elif stage == "self_evaluation":
-        if _has_project_signal(text, stage):
-            update = _merge_patch(update, _extract_experience(text, "projects"))
-        elif _has_award_signal(text, stage):
-            update = _merge_patch(update, _extract_skills_and_awards(text))
-        else:
-            update["self_evaluation"] = text.strip()
-    else:
-        update = _merge_patch(update, _extract_job_intention(text))
-        update = _merge_patch(update, _extract_skills_and_awards(text))
-
-    if stage != "self_evaluation" and _has_job_signal(text):
-        update = _merge_patch(update, _extract_job_intention(text))
-    if stage != "self_evaluation" and _has_project_signal(text, stage):
-        update = _merge_patch(update, _extract_experience(text, "projects"))
-    if stage != "self_evaluation" and _has_award_signal(text, stage):
-        update = _merge_patch(update, _extract_skills_and_awards(text))
-    if stage != "self_evaluation" and _has_project_signal(text, stage) and any(keyword in text for keyword in ("实践", "课题", "社团")):
-        update = _merge_patch(update, _extract_experience(text, "projects"))
-    return _compact_patch(parse_json_object(json.dumps(update, ensure_ascii=False))) or {}
-
-
-def _llm_extract_update(text: str, state: ResumeState, llm: BaseChatModel | None) -> dict[str, Any]:
-    """使用 LLM 抽取用户本轮提供的结构化信息。
-
-    Args:
-        text: 用户输入。
-        state: 当前简历状态。
-        llm: 聊天模型实例。
-
-    Returns:
-        字段更新字典。
-    """
-
-    if llm is None:
-        return {}
-
-    prompt = ChatPromptTemplate.from_messages(
-        [
-            SystemMessage(content=EXTRACTION_SYSTEM_PROMPT),
-            (
-                "human",
-                "当前阶段：{stage}\n当前状态 JSON：{state_json}\n用户本轮输入：{user_input}",
-            ),
-        ]
+    self_evaluation_mode = state.current_stage == "self_evaluation" and not re.search(
+        r"(项目经历|项目名称|项目[:：]|获奖|奖学金|证书)",
+        text,
     )
-    try:
-        response = (prompt | llm).invoke(
+    if (
+        not self_evaluation_mode
+        and re.search(r"(项目|平台|系统|网站|小程序|应用|模型|课题|实践)", text)
+        and not re.search(r"(竞赛|获奖|奖学金|证书)", text)
+    ):
+        project_title = ""
+        title_match = re.search(r"([\u4e00-\u9fa5A-Za-z0-9]+(?:平台|系统|网站|小程序|应用|模型|课题|实践|项目))", text)
+        if title_match:
+            project_title = title_match.group(1)
+        update["projects"] = [
             {
-                "stage": state.current_stage,
-                "state_json": state.model_dump_json(ensure_ascii=False),
-                "user_input": text,
+                "title": project_title,
+                "raw_description": text.strip(),
+                "responsibilities": [text.strip()] if re.search(r"负责|开发|实现|完成|参与|设计|搭建", text) else [],
+                "results": [text.strip()] if re.search(r"\d|%|提升|准确率|排名|响应", text) else [],
             }
-        )
-        content = getattr(response, "content", str(response))
-        if isinstance(content, list):
-            content = "\n".join(str(item) for item in content)
-        return parse_json_object(str(content))
-    except Exception:
-        return {}
+        ]
+
+    if not self_evaluation_mode and re.search(r"(获奖|奖学金|证书|一等奖|二等奖|三等奖|国家级|省级|校级)", text):
+        name_match = re.search(r"([^（(：:，,。；;\n]+(?:竞赛|比赛|奖学金|证书|奖))", text)
+        update["awards"] = [
+            {
+                "name": name_match.group(1).strip() if name_match else text.strip()[:40],
+                "description": text.strip(),
+                "highlights": [text.strip()],
+            }
+        ]
+
+    if self_evaluation_mode and not update.get("projects") and not update.get("awards"):
+        update["self_evaluation"] = text.strip()
+
+    if basic:
+        update["basic_info"] = basic
+    if job:
+        update["job_intention"] = job
+    if education:
+        update["education"] = education
+    if any(skills.values()):
+        update["skills"] = skills
+    return _compact_patch(update) or {}
 
 
-def _apply_update_guards(user_input: str, previous_state: ResumeState, updated_state: ResumeState) -> ResumeState:
-    """按当前用户输入显式意图保护已维护的结构化状态。
-
-    Args:
-        user_input: 用户本轮输入。
-        previous_state: 更新前状态。
-        updated_state: 工具或抽取逻辑更新后的状态。
-
-    Returns:
-        经过服务端校验后的状态。
-    """
-
-    guarded = updated_state.model_copy(deep=True)
-    stage = previous_state.current_stage
-
-    if not _has_personal_signal(user_input):
-        guarded.basic_info.name = previous_state.basic_info.name
-        guarded.basic_info.phone = previous_state.basic_info.phone
-        guarded.basic_info.email = previous_state.basic_info.email
-        guarded.basic_info.native_place = previous_state.basic_info.native_place
-
-    if not _has_education_signal(user_input):
-        guarded.education = previous_state.education.model_copy(deep=True)
-        guarded.basic_info.university = previous_state.basic_info.university
-        guarded.basic_info.major = previous_state.basic_info.major
-        guarded.basic_info.grade = previous_state.basic_info.grade
-
-    if not _has_skill_signal(user_input):
-        guarded.skills = previous_state.skills.model_copy(deep=True)
-
-    if not _has_project_signal(user_input, stage):
-        guarded.projects = [item.model_copy(deep=True) for item in previous_state.projects]
-
-    if not _has_award_signal(user_input, stage):
-        guarded.awards = [item.model_copy(deep=True) for item in previous_state.awards]
-
-    guarded.touch()
-    return guarded
-
-
-def _has_missing_prefix(report: dict[str, Any], prefix: str) -> bool:
-    """判断缺失报告中是否存在指定板块缺口。
-
-    Args:
-        report: 缺失字段报告。
-        prefix: 缺失字段前缀。
-
-    Returns:
-        是否存在指定板块缺失。
-    """
-
-    return any(str(item).startswith(prefix) for item in report.get("missing_fields", []))
-
-
-def _sync_stage(state: ResumeState, previous_stage: str, report: dict[str, Any]) -> ResumeState:
-    """根据状态完整度同步当前对话阶段。
+def _sync_stage(state: ResumeState, report: dict[str, Any]) -> ResumeState:
+    """根据底线校验报告更新 UI 展示阶段。
 
     Args:
         state: 当前简历状态。
-        previous_stage: 更新前阶段。
-        report: 缺失字段报告。
+        report: 底线校验报告。
 
     Returns:
         更新阶段后的简历状态。
     """
 
-    if _has_missing_prefix(report, "个人信息："):
+    missing_fields = [str(item) for item in report.get("missing_fields", [])]
+    if any(item.startswith("个人信息：") for item in missing_fields):
         state.current_stage = "personal_info"
-    elif _has_missing_prefix(report, "教育背景："):
+    elif any(item.startswith("教育背景：") for item in missing_fields):
         state.current_stage = "education"
-    elif _has_missing_prefix(report, "项目经历："):
+    elif any(item.startswith("项目经历：") for item in missing_fields):
         state.current_stage = "projects"
-    elif _has_missing_prefix(report, "竞赛获奖："):
+    elif any(item.startswith("竞赛获奖：") for item in missing_fields):
         state.current_stage = "awards"
-    elif _has_missing_prefix(report, "自我评价："):
+    elif any(item.startswith("自我评价：") for item in missing_fields):
         state.current_stage = "self_evaluation"
     else:
         state.current_stage = "ready"
@@ -774,50 +404,69 @@ def _sync_stage(state: ResumeState, previous_stage: str, report: dict[str, Any])
     return state
 
 
-def build_followup_question(state: ResumeState, report: dict[str, Any]) -> str:
-    """根据阶段和缺失报告生成追问。
+def _build_fallback_question(report: dict[str, Any]) -> str:
+    """根据底线校验报告生成兜底追问。
 
     Args:
-        state: 当前简历状态。
-        report: 缺失字段报告。
+        report: 底线校验报告。
 
     Returns:
-        下一轮对用户的追问文本。
+        面向用户的追问文本。
     """
 
-    missing_fields = report.get("missing_fields", [])
-    optional_suggestions = report.get("optional_suggestions", [])
-    quality_questions = report.get("quality_questions", [])
+    missing_fields = [str(item) for item in report.get("missing_fields", [])]
+    if not missing_fields:
+        return "必要信息已完整。回复“生成简历”即可输出 Markdown 简历，也可以继续补充想强调的内容。"
 
-    if state.current_stage in {"personal_info", "job_intention"}:
-        personal_missing = [
-            item.replace("个人信息：", "")
-            for item in missing_fields
-            if item.startswith("个人信息：")
-        ]
-        focus = "、".join(personal_missing[:3]) if personal_missing else "目标岗位、目标行业、期望城市、姓名、电话、邮箱、籍贯"
-        return f"请先补充个人信息：{focus}。这些信息会出现在简历顶部。"
-    if state.current_stage in {"education", "basic_education"}:
-        education_missing = [
-            item.replace("教育背景：", "")
-            for item in missing_fields
-            if item.startswith("教育背景：")
-        ]
-        focus = "、".join(education_missing[:3]) if education_missing else "学校、学院、专业、专业排名、英语水平、核心课程、技术栈"
-        return f"请补充教育背景：{focus}。"
-    if state.current_stage == "projects":
-        if quality_questions:
-            return quality_questions[0]
-        return "请补充至少 1 段项目经历，包含项目名称和 2-3 条项目要点，建议覆盖技术方法、个人职责和量化结果。"
-    if state.current_stage in {"awards", "skills_awards"}:
-        return "请补充至少 1 项竞赛获奖、奖学金或证书，包含奖项名称和 1-2 条说明，例如负责内容、技术方法、排名或成果。"
-    if state.current_stage == "self_evaluation":
-        return "请补充自我评价，建议 2-3 条，说明技术兴趣、实践能力、协作表达或职业方向。"
-    if quality_questions:
-        return f"必要信息已完整，可以回复“生成简历”。如果想继续优化，建议补充：{quality_questions[0]}"
-    if optional_suggestions:
-        return f"必要信息已完整，可以回复“生成简历”。如果想继续优化，建议先补充：{optional_suggestions[0]}"
-    return "必要信息已完整。回复“生成简历”即可输出 Markdown 简历，也可以继续补充需要强调的内容。"
+    grouped: dict[str, list[str]] = {}
+    for item in missing_fields:
+        section, _, field_name = item.partition("：")
+        grouped.setdefault(section or "待补充", []).append(field_name or item)
+    section, fields = next(iter(grouped.items()))
+    focus = "、".join(fields[:3])
+    return f"还需要补充{section}中的{focus}。你可以直接用自然语言描述，不需要按表单填写。"
+
+
+def _decision_message(decision: ResumeTurnDecision, report: dict[str, Any]) -> str:
+    """选择 LLM 决策中的回复文本。
+
+    Args:
+        decision: LLM 单轮决策。
+        report: 底线校验报告。
+
+    Returns:
+        面向用户的回复文本。
+    """
+
+    if decision.assistant_message.strip():
+        return decision.assistant_message.strip()
+    if decision.followup_questions:
+        return " ".join(question.strip() for question in decision.followup_questions if question.strip())
+    return _build_fallback_question(report)
+
+
+def _extract_structured_response(raw_result: dict[str, Any], model_type: type[BaseModel]) -> BaseModel | None:
+    """从 LangChain Agent 返回值中提取结构化响应。
+
+    Args:
+        raw_result: Agent invoke 返回值。
+        model_type: 期望的 Pydantic 模型类型。
+
+    Returns:
+        结构化响应对象；不存在或类型不匹配时返回 None。
+    """
+
+    if not isinstance(raw_result, dict):
+        return None
+    structured = raw_result.get("structured_response")
+    if isinstance(structured, model_type):
+        return structured
+    if isinstance(structured, dict):
+        try:
+            return model_type.model_validate(structured)
+        except ValueError:
+            return None
+    return None
 
 
 class ResumeAgentService:
@@ -832,9 +481,9 @@ class ResumeAgentService:
         """初始化简历 Agent 服务。
 
         Args:
-            use_llm: 是否启用 LLM 抽取与润色。
+            use_llm: 是否启用 LLM 抽取、追问与润色。
             config: 可选应用配置。
-            use_agent_driver: 是否使用 LangChain Agent 驱动主流程。
+            use_agent_driver: 是否使用 LangChain 结构化 Agent 驱动主流程。
 
         Returns:
             None。
@@ -842,9 +491,11 @@ class ResumeAgentService:
 
         self.config = config or load_config()
         self.llm = build_chat_model(self.config) if use_llm else None
-        self.langchain_agent = build_langchain_agent(self.llm)
+        self.turn_agent = build_langchain_agent(self.llm) if use_agent_driver else None
+        self.polish_agent = _build_polish_agent(self.llm) if use_agent_driver else None
         self.thread_id = str(uuid.uuid4())
         self.use_agent_driver = use_agent_driver
+        self.recent_turns: list[dict[str, str]] = []
 
     def extract_update(self, user_input: str, state: ResumeState) -> dict[str, Any]:
         """抽取用户本轮提供的简历字段更新。
@@ -857,9 +508,10 @@ class ResumeAgentService:
             字段更新字典。
         """
 
-        llm_update = _llm_extract_update(user_input, state, self.llm)
-        heuristic_update = _heuristic_extract_update(user_input, state)
-        return _merge_patch(heuristic_update, _compact_patch(llm_update) or {})
+        decision = self._decide_with_llm(user_input, state, check_missing_fields(state))
+        if decision is not None:
+            return _compact_patch(decision.patch) or {}
+        return _basic_fallback_extract(user_input, state)
 
     def handle_message(
         self,
@@ -877,163 +529,225 @@ class ResumeAgentService:
         """
 
         resume_state = coerce_resume_state(state)
-        if _is_greeting_only(user_input):
-            report = check_missing_fields(resume_state)
-            return AgentTurnResult(
-                assistant_message=(
-                    "你好，我会通过多轮对话帮你生成学生简历。"
-                    "请先告诉我这份简历的目标岗位、目标行业、期望城市，以及姓名、电话、邮箱和籍贯。"
-                ),
-                state=resume_state,
-                missing_report=report,
-                agent_trace=["fast_path: greeting"],
-            )
+        initial_report = check_missing_fields(resume_state)
+        trace: list[str] = []
 
-        if self.use_agent_driver and self.langchain_agent is not None:
-            agent_result = self._handle_message_with_agent(user_input, resume_state)
-            if agent_result is not None:
-                return agent_result
+        decision = self._decide_with_llm(user_input, resume_state, initial_report)
+        if decision is None:
+            decision = self._fallback_decision(user_input, resume_state, initial_report)
+            trace.append("fallback: minimal_rules")
+        else:
+            trace.append("LLM 结构化决策：ResumeTurnDecision")
 
-        return self._handle_message_controlled(user_input, resume_state)
-
-    def _handle_message_controlled(
-        self,
-        user_input: str,
-        state: ResumeState | dict[str, Any] | str | None,
-    ) -> AgentTurnResult:
-        """使用确定性编排处理单轮消息。
-
-        Args:
-            user_input: 用户输入。
-            state: 当前简历状态。
-
-        Returns:
-            单轮处理结果。
-        """
-
-        resume_state = coerce_resume_state(state)
-        previous_stage = resume_state.current_stage
-
-        if user_input.strip():
-            previous_state = resume_state.model_copy(deep=True)
-            update = self.extract_update(user_input, resume_state)
-            resume_state = collect_resume_info(resume_state, update)
-            resume_state = _apply_update_guards(user_input, previous_state, resume_state)
+        patch = _compact_patch(decision.patch) or {}
+        if patch:
+            resume_state = collect_resume_info(resume_state, patch)
+            trace.append("调用工具：collect_resume_info")
 
         report = check_missing_fields(resume_state)
-        resume_state = _sync_stage(resume_state, previous_stage, report)
+        trace.append("调用工具：validate_resume_state")
+        resume_state = _sync_stage(resume_state, report)
         report = check_missing_fields(resume_state)
 
-        if _contains_generate_intent(user_input):
+        should_generate = _contains_generate_intent(user_input) or decision.intent == "generate_resume"
+        if should_generate:
             if not report["is_ready"]:
-                missing_text = "；".join(report["missing_fields"])
-                message = f"现在还不能生成完整简历，仍需补充：{missing_text}\n\n{build_followup_question(resume_state, report)}"
-                return AgentTurnResult(message, resume_state, report, agent_trace=["fallback: controlled_flow"])
+                message = f"现在还不能生成完整简历，仍需补充：{'；'.join(report['missing_fields'])}\n\n{_decision_message(decision, report)}"
+                self._remember_turn(user_input, message)
+                return AgentTurnResult(message, resume_state, report, agent_trace=trace)
 
-            polished_state = polish_state_experiences(resume_state, self.llm)
+            polished_state = self._polish_state_before_generation(resume_state, trace)
+            polished_report = check_missing_fields(polished_state)
+            if not polished_report["is_ready"]:
+                message = f"生成前校验发现还缺少：{'；'.join(polished_report['missing_fields'])}\n\n{_build_fallback_question(polished_report)}"
+                self._remember_turn(user_input, message)
+                return AgentTurnResult(message, polished_state, polished_report, agent_trace=trace)
+
             result = fill_resume_template(polished_state)
+            trace.append("调用工具：fill_resume_template")
             message = f"已生成 Markdown 简历：{result['output_path']}\n\n{result['markdown']}"
+            self._remember_turn(user_input, message)
             return AgentTurnResult(
                 assistant_message=message,
                 state=polished_state,
-                missing_report=report,
+                missing_report=polished_report,
                 resume_markdown=result["markdown"],
                 output_path=result["output_path"],
-                agent_trace=["fallback: controlled_flow"],
+                agent_trace=trace,
             )
 
-        return AgentTurnResult(
-            assistant_message=build_followup_question(resume_state, report),
-            state=resume_state,
-            missing_report=report,
-            agent_trace=["fallback: controlled_flow"],
-        )
+        message = _decision_message(decision, report)
+        if report["is_ready"] and "生成简历" not in message:
+            message = f"{message}\n\n必要信息已完整，可以回复“生成简历”输出 Markdown 简历。"
+        self._remember_turn(user_input, message)
+        return AgentTurnResult(message, resume_state, report, agent_trace=trace)
 
-    def _handle_message_with_agent(self, user_input: str, state: ResumeState) -> AgentTurnResult | None:
-        """使用 LangChain Agent 主导处理单轮消息。
+    def _decide_with_llm(
+        self,
+        user_input: str,
+        state: ResumeState,
+        report: dict[str, Any],
+    ) -> ResumeTurnDecision | None:
+        """调用 LLM 生成单轮结构化决策。
 
         Args:
             user_input: 用户输入。
             state: 当前简历状态。
+            report: 当前底线校验报告。
 
         Returns:
-            Agent 处理结果；失败时返回 None 以便兜底。
+            LLM 决策；失败时返回 None。
         """
 
-        if self.langchain_agent is None:
+        if self.turn_agent is not None:
+            prompt = TURN_DECISION_USER_PROMPT.format(
+                state_json=state.model_dump_json(ensure_ascii=False),
+                validation_report=json.dumps(report, ensure_ascii=False),
+                recent_turns=json.dumps(self.recent_turns[-6:], ensure_ascii=False),
+                user_input=user_input,
+            )
+            try:
+                raw_result = self.turn_agent.invoke(
+                    {"messages": [{"role": "user", "content": prompt}]},
+                    config={
+                        "configurable": {"thread_id": f"{self.thread_id}:turn:{uuid.uuid4()}"},
+                        "recursion_limit": 6,
+                    },
+                )
+                structured = _extract_structured_response(raw_result, ResumeTurnDecision)
+                if isinstance(structured, ResumeTurnDecision):
+                    return structured
+            except Exception:
+                pass
+
+        if self.llm is None:
             return None
 
-        prompt = AGENT_DRIVER_PROMPT.format(
-            state_json=state.model_dump_json(ensure_ascii=False),
-            current_stage=state.current_stage,
-            user_input=user_input,
+        prompt = ChatPromptTemplate.from_messages(
+            [
+                ("system", TURN_DECISION_SYSTEM_PROMPT),
+                ("human", TURN_DECISION_USER_PROMPT),
+            ]
         )
-
         try:
-            raw_result = self.langchain_agent.invoke(
-                {"messages": [{"role": "user", "content": prompt}]},
-                config={
-                    "configurable": {"thread_id": f"{self.thread_id}:{uuid.uuid4()}"},
-                    "recursion_limit": 8,
-                },
+            response = (prompt | self.llm).invoke(
+                {
+                    "state_json": state.model_dump_json(ensure_ascii=False),
+                    "validation_report": json.dumps(report, ensure_ascii=False),
+                    "recent_turns": json.dumps(self.recent_turns[-6:], ensure_ascii=False),
+                    "user_input": user_input,
+                }
             )
+            content = getattr(response, "content", str(response))
+            if isinstance(content, list):
+                content = "\n".join(str(item) for item in content)
+            parsed = parse_json_object(str(content))
+            return ResumeTurnDecision.model_validate(parsed) if parsed else None
         except Exception:
             return None
 
-        payload, tool_state, tool_report, tool_resume, trace = self._parse_agent_result(raw_result)
-        if not trace:
-            return None
-        payload_state = payload.get("state_json") if isinstance(payload, dict) else ""
-        updated_state = coerce_resume_state(payload_state or tool_state or state)
-        updated_state = _apply_update_guards(user_input, state, updated_state)
-        heuristic_update = _heuristic_extract_update(user_input, state)
-        if heuristic_update:
-            updated_state = collect_resume_info(updated_state, heuristic_update)
-            updated_state = _apply_update_guards(user_input, state, updated_state)
-        previous_stage = state.current_stage
-        report = check_missing_fields(updated_state)
-        updated_state = _sync_stage(updated_state, previous_stage, report)
-        report = check_missing_fields(updated_state)
+    def _fallback_decision(
+        self,
+        user_input: str,
+        state: ResumeState,
+        report: dict[str, Any],
+    ) -> ResumeTurnDecision:
+        """生成无 LLM 时的最小兜底决策。
 
-        should_generate = _contains_generate_intent(user_input)
-        generated_markdown = ""
-        output_path = ""
-        if should_generate and tool_resume:
-            generated_markdown = str(tool_resume.get("markdown", ""))
-            output_path = str(tool_resume.get("output_path", ""))
-        elif should_generate and payload.get("resume_markdown"):
-            generated_markdown = str(payload.get("resume_markdown", ""))
-            output_path = str(payload.get("output_path", ""))
+        Args:
+            user_input: 用户输入。
+            state: 当前简历状态。
+            report: 当前底线校验报告。
 
-        if output_path and not generated_markdown:
-            generated_markdown = self._read_generated_markdown(output_path)
+        Returns:
+            兜底单轮决策。
+        """
 
-        if should_generate and report["is_ready"] and not output_path:
-            result = fill_resume_template(updated_state)
-            generated_markdown = result["markdown"]
-            output_path = result["output_path"]
-            trace.append("服务端补偿执行：fill_resume_template")
+        if _is_greeting_only(user_input):
+            return ResumeTurnDecision(
+                intent="greeting",
+                assistant_message="你好，我会通过多轮对话帮你生成学生简历。你可以先自然描述求职方向、基本信息、教育背景或项目经历。",
+            )
 
-        assistant_message = str(payload.get("assistant_message") or "").strip()
-        if not generated_markdown:
-            assistant_message = build_followup_question(updated_state, report)
-        elif not assistant_message:
-            assistant_message = build_followup_question(updated_state, report)
+        patch = _basic_fallback_extract(user_input, state) if user_input.strip() else {}
+        if _contains_generate_intent(user_input):
+            return ResumeTurnDecision(intent="generate_resume", patch=patch, assistant_message=_build_fallback_question(report))
+        return ResumeTurnDecision(intent="collect_info", patch=patch, assistant_message=_build_fallback_question(report))
 
-        if generated_markdown and output_path:
-            assistant_message = f"已生成 Markdown 简历：{output_path}\n\n{generated_markdown}"
+    def _polish_state_before_generation(self, state: ResumeState, trace: list[str]) -> ResumeState:
+        """在模板填充前执行 LLM 结构化清洗。
 
-        return AgentTurnResult(
-            assistant_message=assistant_message,
-            state=updated_state,
-            missing_report=report,
-            resume_markdown=generated_markdown,
-            output_path=output_path,
-            agent_trace=trace,
+        Args:
+            state: 待生成简历的状态。
+            trace: 本轮轨迹列表。
+
+        Returns:
+            清洗后的简历状态。
+        """
+
+        if self.polish_agent is not None:
+            prompt = FINAL_POLISH_USER_PROMPT.format(state_json=state.model_dump_json(ensure_ascii=False))
+            try:
+                raw_result = self.polish_agent.invoke(
+                    {"messages": [{"role": "user", "content": prompt}]},
+                    config={
+                        "configurable": {"thread_id": f"{self.thread_id}:polish:{uuid.uuid4()}"},
+                        "recursion_limit": 6,
+                    },
+                )
+                structured = _extract_structured_response(raw_result, ResumePolishResult)
+                if isinstance(structured, ResumePolishResult):
+                    trace.append("LLM 结构化清洗：ResumePolishResult")
+                    polished_state = structured.state.model_copy(deep=True)
+                    polished_state.touch()
+                    return polished_state
+            except Exception:
+                pass
+
+        if self.llm is not None:
+            prompt = ChatPromptTemplate.from_messages(
+                [
+                    ("system", FINAL_POLISH_SYSTEM_PROMPT),
+                    ("human", FINAL_POLISH_USER_PROMPT),
+                ]
+            )
+            try:
+                response = (prompt | self.llm).invoke({"state_json": state.model_dump_json(ensure_ascii=False)})
+                content = getattr(response, "content", str(response))
+                parsed = parse_json_object(str(content))
+                if parsed:
+                    result = ResumePolishResult.model_validate(parsed)
+                    trace.append("LLM JSON 清洗：ResumePolishResult")
+                    polished_state = result.state.model_copy(deep=True)
+                    polished_state.touch()
+                    return polished_state
+            except Exception:
+                pass
+
+        trace.append("fallback: polish_state_experiences")
+        return polish_state_experiences(state)
+
+    def _remember_turn(self, user_input: str, assistant_message: str) -> None:
+        """记录最近对话摘要供下一轮 LLM 使用。
+
+        Args:
+            user_input: 用户输入。
+            assistant_message: 助手回复。
+
+        Returns:
+            None。
+        """
+
+        self.recent_turns.append(
+            {
+                "user": user_input,
+                "assistant": assistant_message[:600],
+            }
         )
+        self.recent_turns = self.recent_turns[-8:]
 
     def _read_generated_markdown(self, output_path: str) -> str:
-        """从输出文件读取 Agent 生成的 Markdown 简历。
+        """从输出文件读取 Markdown 简历。
 
         Args:
             output_path: Markdown 文件路径。
@@ -1046,54 +760,3 @@ class ResumeAgentService:
             return Path(output_path).read_text(encoding="utf-8")
         except OSError:
             return ""
-
-    def _parse_agent_result(
-        self,
-        raw_result: dict[str, Any],
-    ) -> tuple[dict[str, Any], str, dict[str, Any], dict[str, Any], list[str]]:
-        """解析 LangChain Agent 输出、工具返回和调用轨迹。
-
-        Args:
-            raw_result: Agent invoke 返回值。
-
-        Returns:
-            最终 JSON、工具状态 JSON、缺失报告、生成结果、调用轨迹。
-        """
-
-        messages = raw_result.get("messages", []) if isinstance(raw_result, dict) else []
-        last_human_index = -1
-        for index, message in enumerate(messages):
-            if message.__class__.__name__ == "HumanMessage":
-                last_human_index = index
-        messages = messages[last_human_index + 1 :]
-        final_payload: dict[str, Any] = {}
-        tool_state = ""
-        tool_report: dict[str, Any] = {}
-        tool_resume: dict[str, Any] = {}
-        trace: list[str] = []
-
-        for message in messages:
-            tool_calls = getattr(message, "tool_calls", None) or []
-            for call in tool_calls:
-                name = call.get("name", "unknown_tool")
-                args = call.get("args", {})
-                trace.append(f"调用工具：{name}，参数：{list(args.keys())}")
-
-            content = getattr(message, "content", "")
-            if not content:
-                continue
-
-            parsed = parse_json_object(str(content))
-            if not parsed:
-                continue
-
-            if {"basic_info", "job_intention", "education"}.issubset(parsed.keys()):
-                tool_state = json.dumps(parsed, ensure_ascii=False)
-            elif {"missing_fields", "quality_questions", "is_ready"}.issubset(parsed.keys()):
-                tool_report = parsed
-            elif {"markdown", "output_path"}.issubset(parsed.keys()):
-                tool_resume = parsed
-            else:
-                final_payload = parsed
-
-        return final_payload, tool_state, tool_report, tool_resume, trace

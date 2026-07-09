@@ -113,6 +113,87 @@ def _unique_extend(base: list[Any], patch: list[Any]) -> list[Any]:
     return result
 
 
+def _split_scalar_list_text(text: str, key: str) -> list[str]:
+    """将模型误返回的列表字符串拆成列表。
+
+    Args:
+        text: 原始字符串。
+        key: 字段名，用于选择拆分策略。
+
+    Returns:
+        字符串列表。
+    """
+
+    cleaned = text.strip().strip("。；;")
+    if not cleaned:
+        return []
+
+    if key in {"courses", "programming_languages", "tools", "professional_skills", "languages", "technologies"}:
+        parts = re.split(r"[、,，;；/|\n]+", cleaned)
+    else:
+        bullet_text = re.sub(r"(?:^|\n)\s*[-*]\s*", "\n", cleaned)
+        parts = re.split(r"\n+|[；;]+", bullet_text)
+    return [part.strip(" -：:。.") for part in parts if part.strip(" -：:。.")]
+
+
+def _coerce_list_value(value: Any, key: str) -> list[Any]:
+    """将字段值规整为列表。
+
+    Args:
+        value: 原始字段值。
+        key: 字段名。
+
+    Returns:
+        列表形式字段值。
+    """
+
+    if _is_blank(value):
+        return []
+    if isinstance(value, list):
+        return value
+    if isinstance(value, tuple | set):
+        return list(value)
+    if isinstance(value, str):
+        return _split_scalar_list_text(value, key)
+    return [value]
+
+
+def _normalize_resume_payload(payload: Any, key: str = "") -> Any:
+    """规整 LLM 或工具输入的 ResumeState 字段形状。
+
+    Args:
+        payload: 原始补丁或状态数据。
+        key: 当前字段名。
+
+    Returns:
+        可被 `ResumeState` 校验的规整数据。
+    """
+
+    list_fields = {
+        "courses",
+        "technologies",
+        "responsibilities",
+        "results",
+        "polished_bullets",
+        "programming_languages",
+        "tools",
+        "professional_skills",
+        "languages",
+        "highlights",
+    }
+    record_list_fields = {"projects", "internships", "awards"}
+
+    if key in record_list_fields and isinstance(payload, Mapping):
+        payload = [payload]
+    if key in list_fields:
+        return [_normalize_resume_payload(item) for item in _coerce_list_value(payload, key)]
+    if isinstance(payload, Mapping):
+        return {item_key: _normalize_resume_payload(item_value, item_key) for item_key, item_value in payload.items()}
+    if isinstance(payload, list):
+        return [_normalize_resume_payload(item) for item in payload]
+    return payload
+
+
 def _merge_dict(base: dict[str, Any], patch: Mapping[str, Any]) -> dict[str, Any]:
     """递归合并字典。
 
@@ -229,6 +310,7 @@ def collect_resume_info(
 
     resume_state = coerce_resume_state(state)
     patch = parse_json_object(updates) if isinstance(updates, str) else dict(updates)
+    patch = _normalize_resume_payload(patch)
     if not patch:
         return resume_state
 
@@ -242,6 +324,7 @@ def collect_resume_info(
         patch = {item_key: item_value for item_key, item_value in patch.items() if item_key != "awards"}
 
     data = _merge_dict(data, patch)
+    data = _normalize_resume_payload(data)
     data["projects"] = _merge_records([], data.get("projects", []), "title")
     data["internships"] = _merge_records([], data.get("internships", []), "title")
     data["awards"] = _merge_records([], data.get("awards", []), "name")
@@ -370,20 +453,46 @@ def _meaningful_experiences(experiences: list[Experience]) -> list[Experience]:
     return sorted(meaningful, key=_experience_score, reverse=True)
 
 
-def check_missing_fields(state: ResumeState | Mapping[str, Any] | str | None) -> dict[str, Any]:
-    """检查必要字段缺失与经历质量问题。
+def _has_valid_phone(text: str) -> bool:
+    """判断电话字段是否满足基础格式。
+
+    Args:
+        text: 电话字段文本。
+
+    Returns:
+        是否为可接受的电话格式。
+    """
+
+    return bool(re.fullmatch(r"(?:1[3-9]\d{9}|\d{3,4}[-\s]?\d{7,8})", text.strip()))
+
+
+def _has_valid_email(text: str) -> bool:
+    """判断邮箱字段是否满足基础格式。
+
+    Args:
+        text: 邮箱字段文本。
+
+    Returns:
+        是否为可接受的邮箱格式。
+    """
+
+    return bool(re.fullmatch(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+", text.strip()))
+
+
+def validate_resume_state(state: ResumeState | Mapping[str, Any] | str | None) -> dict[str, Any]:
+    """执行模板生成前的底线校验。
 
     Args:
         state: 当前简历状态。
 
     Returns:
-        包含缺失字段、质量追问和是否可生成的报告。
+        包含缺失字段、格式错误、质量建议和是否可生成的报告。
     """
 
     resume_state = coerce_resume_state(state)
     missing_fields: list[str] = []
+    validation_errors: list[str] = []
     quality_questions: list[str] = []
-    optional_suggestions: list[str] = []
 
     if not resume_state.job_intention.target_position:
         missing_fields.append("个人信息：目标岗位")
@@ -395,8 +504,12 @@ def check_missing_fields(state: ResumeState | Mapping[str, Any] | str | None) ->
         missing_fields.append("个人信息：姓名")
     if not resume_state.basic_info.phone:
         missing_fields.append("个人信息：电话")
+    elif not _has_valid_phone(resume_state.basic_info.phone):
+        validation_errors.append("个人信息：电话格式不正确")
     if not resume_state.basic_info.email:
         missing_fields.append("个人信息：邮箱")
+    elif not _has_valid_email(resume_state.basic_info.email):
+        validation_errors.append("个人信息：邮箱格式不正确")
     if not resume_state.basic_info.native_place:
         missing_fields.append("个人信息：籍贯")
     if not (resume_state.education.school or resume_state.basic_info.university):
@@ -429,20 +542,32 @@ def check_missing_fields(state: ResumeState | Mapping[str, Any] | str | None) ->
 
     if not resume_state.self_evaluation:
         missing_fields.append("自我评价：2-3 条个人优势")
-    if len(meaningful_projects) < 2:
-        optional_suggestions.append("建议补充第 2 段项目经历，让项目板块更接近标准示例。")
-    if len(meaningful_awards) < 2:
-        optional_suggestions.append("建议补充第 2 项竞赛获奖、奖学金或证书，让奖项板块更完整。")
 
+    blocking_fields = missing_fields + validation_errors
     return {
-        "is_ready": not missing_fields,
-        "can_generate": not missing_fields,
+        "is_ready": not blocking_fields,
+        "can_generate": not blocking_fields,
         "required_missing_fields": missing_fields,
         "missing_fields": missing_fields,
+        "validation_errors": validation_errors,
+        "blocking_fields": blocking_fields,
         "quality_questions": quality_questions,
-        "optional_suggestions": optional_suggestions,
+        "optional_suggestions": [],
         "current_stage": resume_state.current_stage,
     }
+
+
+def check_missing_fields(state: ResumeState | Mapping[str, Any] | str | None) -> dict[str, Any]:
+    """兼容旧接口的简历底线校验函数。
+
+    Args:
+        state: 当前简历状态。
+
+    Returns:
+        包含缺失字段、质量建议和是否可生成的报告。
+    """
+
+    return validate_resume_state(state)
 
 
 def _clean_markdown_list(items: list[str]) -> list[str]:
@@ -758,18 +883,32 @@ def collect_resume_info_tool(current_state_json: str, update_json: str) -> str:
 
 
 @tool
-def check_missing_fields_tool(current_state_json: str) -> str:
-    """检查简历必要字段与经历质量。
+def validate_resume_state_tool(current_state_json: str) -> str:
+    """执行模板生成前的底线校验。
 
     Args:
         current_state_json: 当前简历状态 JSON。
 
     Returns:
-        缺失字段与质量检查 JSON 报告。
+        缺失字段、格式错误与质量建议 JSON 报告。
     """
 
-    report = check_missing_fields(current_state_json)
+    report = validate_resume_state(current_state_json)
     return json.dumps(report, ensure_ascii=False)
+
+
+@tool
+def check_missing_fields_tool(current_state_json: str) -> str:
+    """兼容旧工具名的底线校验工具。
+
+    Args:
+        current_state_json: 当前简历状态 JSON。
+
+    Returns:
+        缺失字段、格式错误与质量建议 JSON 报告。
+    """
+
+    return validate_resume_state_tool.invoke({"current_state_json": current_state_json})
 
 
 @tool
@@ -812,7 +951,6 @@ def fill_resume_template_tool(current_state_json: str) -> str:
 
 RESUME_TOOLS = [
     collect_resume_info_tool,
-    check_missing_fields_tool,
-    polish_experience_tool,
+    validate_resume_state_tool,
     fill_resume_template_tool,
 ]

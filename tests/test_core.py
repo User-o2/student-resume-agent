@@ -138,6 +138,36 @@ class ResumeToolTestCase(unittest.TestCase):
         self.assertEqual(state.projects[0].technologies, ["Flask", "Redis", "Celery"])
         self.assertEqual(state.projects[0].results, ["接口吞吐量提升约 40%"])
 
+    def test_collect_resume_info_normalizes_llm_string_lists(self) -> None:
+        """验证 LLM 将列表字段误返回为字符串时可以自动规整。"""
+
+        state = collect_resume_info(
+            ResumeState(),
+            {
+                "education": {"courses": "机器学习、深度学习、数据结构与算法"},
+                "projects": {
+                    "title": "基于轻量级CNN的手写数字识别系统",
+                    "technologies": "TensorFlow, Keras, Flask",
+                    "responsibilities": "负责数据清洗与增强，使用TensorFlow/Keras搭建MobileNetV2变体，另封装为Flask接口。",
+                    "results": "测试集准确率99.1%；响应时间低于200ms。",
+                },
+                "skills": {
+                    "programming_languages": "Python, C++",
+                    "tools": "PyTorch, Linux, Git",
+                },
+            },
+        )
+
+        self.assertEqual(state.education.courses, ["机器学习", "深度学习", "数据结构与算法"])
+        self.assertEqual(state.projects[0].technologies, ["TensorFlow", "Keras", "Flask"])
+        self.assertEqual(
+            state.projects[0].responsibilities,
+            ["负责数据清洗与增强，使用TensorFlow/Keras搭建MobileNetV2变体，另封装为Flask接口"],
+        )
+        self.assertEqual(state.projects[0].results, ["测试集准确率99.1%", "响应时间低于200ms"])
+        self.assertEqual(state.skills.programming_languages, ["Python", "C++"])
+        self.assertEqual(state.skills.tools, ["PyTorch", "Linux", "Git"])
+
     def test_check_missing_fields_uses_best_meaningful_project(self) -> None:
         """验证空项目不会导致完整项目被误判为缺技术。"""
 

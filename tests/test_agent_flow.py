@@ -5,8 +5,112 @@ from __future__ import annotations
 import unittest
 from unittest.mock import patch
 
-from app.agent import ResumeAgentService
+from app.agent import ResumeAgentService, ResumeTurnDecision
 from app.schema import ResumeState
+from app.tools import collect_resume_info
+
+
+class FakeDecisionService(ResumeAgentService):
+    """使用预设结构化决策模拟 LLM 的测试服务。"""
+
+    def __init__(self, decisions: list[ResumeTurnDecision], polished_state: ResumeState | None = None) -> None:
+        """初始化假 LLM 服务。
+
+        Args:
+            decisions: 依次返回的结构化单轮决策。
+            polished_state: 可选的生成前清洗状态。
+
+        Returns:
+            None。
+        """
+
+        super().__init__(use_llm=False, use_agent_driver=False)
+        self.decisions = list(decisions)
+        self.polished_state = polished_state
+
+    def _decide_with_llm(
+        self,
+        user_input: str,
+        state: ResumeState,
+        report: dict,
+    ) -> ResumeTurnDecision | None:
+        """返回预设的结构化 LLM 决策。
+
+        Args:
+            user_input: 用户输入。
+            state: 当前简历状态。
+            report: 当前校验报告。
+
+        Returns:
+            预设决策；没有预设时返回 None。
+        """
+
+        if not self.decisions:
+            return None
+        return self.decisions.pop(0)
+
+    def _polish_state_before_generation(self, state: ResumeState, trace: list[str]) -> ResumeState:
+        """返回预设的生成前清洗状态。
+
+        Args:
+            state: 待清洗状态。
+            trace: 本轮轨迹列表。
+
+        Returns:
+            预设清洗状态或原状态。
+        """
+
+        trace.append("LLM 结构化清洗：ResumePolishResult")
+        return self.polished_state or state
+
+
+def build_ready_state() -> ResumeState:
+    """构造可生成简历的完整状态。
+
+    Args:
+        无。
+
+    Returns:
+        完整的简历状态。
+    """
+
+    return collect_resume_info(
+        ResumeState(),
+        {
+            "basic_info": {
+                "name": "张明",
+                "university": "南京大学",
+                "major": "人工智能",
+                "phone": "13800001234",
+                "email": "zhangming@edu.cn",
+                "native_place": "江苏南京",
+            },
+            "job_intention": {
+                "target_position": "人工智能算法实习生",
+                "target_industry": "互联网",
+                "expected_city": "北京",
+            },
+            "education": {
+                "school": "南京大学",
+                "college": "人工智能学院",
+                "major": "人工智能",
+                "courses": ["机器学习", "深度学习"],
+                "gpa_or_rank": "专业前15%",
+                "english_level": "CET-6 540",
+            },
+            "projects": [
+                {
+                    "title": "手写数字识别系统",
+                    "technologies": ["Python", "PyTorch"],
+                    "responsibilities": ["负责模型训练"],
+                    "results": ["测试集准确率 99.1%"],
+                }
+            ],
+            "skills": {"programming_languages": ["Python"], "tools": ["PyTorch"]},
+            "awards": [{"name": "数学建模竞赛省级一等奖", "description": "团队排名前8%"}],
+            "self_evaluation": "对计算机视觉有兴趣，具备模型训练实践经验。",
+        },
+    )
 
 
 class ResumeAgentFlowTestCase(unittest.TestCase):
@@ -91,6 +195,114 @@ class ResumeAgentFlowTestCase(unittest.TestCase):
         self.assertEqual(state.education.major, "人工智能")
         self.assertEqual(state.projects, [])
         self.assertEqual([award.name for award in state.awards], ["全国大学生数学建模竞赛", "校级优秀学生奖学金"])
+
+    def test_llm_decision_extracts_unlabeled_skill_list(self) -> None:
+        """验证 LLM 主链路可以抽取没有“技术栈”标签的技能列表。"""
+
+        decision = ResumeTurnDecision(
+            intent="collect_info",
+            patch={"skills": {"programming_languages": ["Python", "C++"], "tools": ["PyTorch", "Linux", "Git"]}},
+            assistant_message="这些技能我已经记录了。请继续补充项目经历。",
+        )
+        service = FakeDecisionService([decision])
+
+        result = service.handle_message("Python, C++, PyTorch, Linux, Git", ResumeState())
+
+        self.assertEqual(result.state.skills.programming_languages, ["Python", "C++"])
+        self.assertIn("PyTorch", result.state.skills.tools)
+        self.assertIn("LLM 结构化决策：ResumeTurnDecision", result.agent_trace)
+
+    def test_llm_decision_extracts_cross_section_natural_text(self) -> None:
+        """验证 LLM 主链路可以从自然长文本跨模块抽取信息。"""
+
+        decision = ResumeTurnDecision(
+            intent="collect_info",
+            patch={
+                "basic_info": {"name": "王欣", "phone": "13800000002", "email": "wangxin@example.com"},
+                "job_intention": {"target_position": "机器学习实习", "target_industry": "人工智能", "expected_city": "上海"},
+                "education": {"school": "南京理工大学", "college": "人工智能学院", "major": "人工智能"},
+                "projects": [
+                    {
+                        "title": "垃圾分类图像识别模型",
+                        "technologies": ["PyTorch", "ResNet"],
+                        "responsibilities": ["负责数据清洗和模型训练"],
+                        "results": ["验证集准确率 91.3%"],
+                    }
+                ],
+            },
+            assistant_message="已记录你的基本信息、求职方向和项目经历。还需要补充成绩排名、英语水平、核心课程、奖项和自我评价。",
+        )
+        service = FakeDecisionService([decision])
+
+        result = service.handle_message("我叫王欣，想去上海做机器学习实习，也做过垃圾分类识别。", ResumeState())
+
+        self.assertEqual(result.state.basic_info.name, "王欣")
+        self.assertEqual(result.state.job_intention.expected_city, "上海")
+        self.assertEqual(result.state.projects[0].title, "垃圾分类图像识别模型")
+
+    def test_generation_request_is_blocked_by_validation(self) -> None:
+        """验证 LLM 想生成时仍会被底线校验拦截。"""
+
+        partial_state = collect_resume_info(
+            ResumeState(),
+            {
+                "basic_info": {"name": "李明", "email": "liming@example.com"},
+                "job_intention": {"target_position": "Python 后端实习"},
+            },
+        )
+        decision = ResumeTurnDecision(
+            intent="generate_resume",
+            patch={},
+            assistant_message="我准备生成简历。",
+        )
+        service = FakeDecisionService([decision])
+
+        result = service.handle_message("生成简历", partial_state)
+
+        self.assertEqual(result.output_path, "")
+        self.assertFalse(result.missing_report["is_ready"])
+        self.assertIn("现在还不能生成完整简历", result.assistant_message)
+
+    def test_generation_uses_polished_state_before_template_fill(self) -> None:
+        """验证生成前会先使用 LLM 清洗后的状态再填充模板。"""
+
+        ready_state = build_ready_state()
+        polished_state = ready_state.model_copy(deep=True)
+        polished_state.projects[0].responsibilities = ["负责模型训练", "负责模型训练"]
+        polished_state.projects[0].results = ["测试集准确率 99.1%"]
+        polished_state.projects[0].polished_bullets = [
+            "负责手写数字识别模型训练与评估，完成数据预处理、模型调参与结果分析",
+            "在测试集上取得 99.1% 准确率，并整理实验结论支撑后续优化",
+        ]
+        decision = ResumeTurnDecision(intent="generate_resume", patch={}, assistant_message="开始生成简历。")
+        service = FakeDecisionService([decision], polished_state=polished_state)
+
+        def fake_fill(state: ResumeState) -> dict[str, str]:
+            """模拟模板填充并断言使用了清洗后的项目要点。
+
+            Args:
+                state: 传入模板填充函数的简历状态。
+
+            Returns:
+                模拟的 Markdown 内容和输出路径。
+            """
+
+            self.assertEqual(state.projects[0].polished_bullets, polished_state.projects[0].polished_bullets)
+            markdown = "\n".join(
+                [
+                    "# 张明",
+                    "## 项目经历",
+                    "- 负责手写数字识别模型训练与评估，完成数据预处理、模型调参与结果分析",
+                    "- 在测试集上取得 99.1% 准确率，并整理实验结论支撑后续优化",
+                ]
+            )
+            return {"markdown": markdown, "output_path": "/tmp/resume.md"}
+
+        with patch("app.agent.fill_resume_template", side_effect=fake_fill):
+            result = service.handle_message("生成简历", ready_state)
+
+        self.assertNotIn("待补充", result.resume_markdown)
+        self.assertEqual(result.resume_markdown.count("负责手写数字识别模型训练"), 1)
 
 
 if __name__ == "__main__":
