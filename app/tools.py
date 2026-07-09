@@ -258,26 +258,6 @@ def collect_resume_info(
     return updated_state
 
 
-def _has_any_skill(state: ResumeState) -> bool:
-    """判断是否已经采集到至少一项技能。
-
-    Args:
-        state: 当前简历状态。
-
-    Returns:
-        是否存在技能信息。
-    """
-
-    return any(
-        [
-            state.skills.programming_languages,
-            state.skills.tools,
-            state.skills.professional_skills,
-            state.skills.languages,
-        ]
-    )
-
-
 def _has_required_tech_stack(state: ResumeState) -> bool:
     """判断是否已有可填入模板的技术栈。
 
@@ -288,7 +268,17 @@ def _has_required_tech_stack(state: ResumeState) -> bool:
         是否存在至少一种技术或专业技能。
     """
 
-    return _has_any_skill(state)
+    project_technologies = [
+        technology
+        for project in _meaningful_experiences(state.projects)
+        for technology in project.technologies
+    ]
+    return bool(
+        state.skills.programming_languages
+        or state.skills.tools
+        or state.skills.professional_skills
+        or project_technologies
+    )
 
 
 def _experience_has_template_content(experience: Experience) -> bool:
@@ -646,11 +636,12 @@ def _format_self_evaluation(text: str) -> str:
     return "\n".join(f"- {item}" for item in items[:4]) if items else f"- {text.strip()}"
 
 
-def _format_tech_stack(skills: Skills) -> str:
+def _format_tech_stack(skills: Skills, projects: list[Experience] | None = None) -> str:
     """格式化模板教育背景中的技术栈。
 
     Args:
         skills: 技能结构化字段。
+        projects: 项目经历列表，用于补充项目技术栈。
 
     Returns:
         技术栈文本。
@@ -661,9 +652,11 @@ def _format_tech_stack(skills: Skills) -> str:
         + list(skills.tools)
         + list(skills.professional_skills)
     )
+    for project in _meaningful_experiences(projects or []):
+        items.extend(project.technologies)
     deduped: list[str] = []
     for item in items:
-        if item and item not in deduped:
+        if item and item not in deduped and not re.search(r"(专业排名|英语水平|核心课程|主修课程|GPA)", item):
             deduped.append(item)
     return _join_or_default(deduped, separator=", ")
 
@@ -703,7 +696,7 @@ def build_template_context(state: ResumeState | Mapping[str, Any] | str | None) 
         "rank": education.gpa_or_rank or "待补充",
         "english_level": education.english_level or "待补充",
         "core_courses": _join_or_default(education.courses, separator="，"),
-        "tech_stack": _format_tech_stack(skills),
+        "tech_stack": _format_tech_stack(skills, resume_state.projects),
         "projects": _format_experiences(resume_state.projects, "- 待补充", max_items=3),
         "awards": _format_awards(resume_state.awards),
         "self_evaluation": _format_self_evaluation(resume_state.self_evaluation),

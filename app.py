@@ -3,12 +3,32 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime
+from pathlib import Path
 
 import streamlit as st
 
 from app.agent import ResumeAgentService
+from app.config import OUTPUTS_DIR
 from app.schema import ResumeState
 from app.tools import STAGE_LABELS, check_missing_fields
+
+
+CONVERSATION_DIR = OUTPUTS_DIR / "conversations"
+
+
+def new_session_log_path() -> str:
+    """生成当前会话日志文件路径。
+
+    Args:
+        无。
+
+    Returns:
+        会话日志文件路径字符串。
+    """
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    return str(CONVERSATION_DIR / f"session_{timestamp}.json")
 
 
 def init_session_state() -> None:
@@ -38,6 +58,32 @@ def init_session_state() -> None:
         st.session_state.agent_trace = []
     if "pending_user_input" not in st.session_state:
         st.session_state.pending_user_input = ""
+    if "session_log_path" not in st.session_state:
+        st.session_state.session_log_path = new_session_log_path()
+
+
+def save_conversation_log(event: str = "turn_complete") -> None:
+    """保存当前 Streamlit 会话的完整对话日志。
+
+    Args:
+        event: 触发保存的事件名称。
+
+    Returns:
+        None。
+    """
+
+    CONVERSATION_DIR.mkdir(parents=True, exist_ok=True)
+    path = Path(st.session_state.session_log_path)
+    payload = {
+        "event": event,
+        "saved_at": datetime.now().isoformat(timespec="seconds"),
+        "messages": st.session_state.messages,
+        "resume_state": st.session_state.resume_state.model_dump(),
+        "agent_trace": st.session_state.agent_trace,
+        "output_path": st.session_state.output_path,
+        "has_resume_markdown": bool(st.session_state.resume_markdown),
+    }
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 @st.cache_resource(show_spinner=False)
@@ -75,6 +121,8 @@ def reset_session() -> None:
     st.session_state.output_path = ""
     st.session_state.agent_trace = []
     st.session_state.pending_user_input = ""
+    st.session_state.session_log_path = new_session_log_path()
+    save_conversation_log("reset")
 
 
 def render_sidebar(use_llm: bool) -> None:
@@ -175,6 +223,7 @@ def process_pending_message(use_llm: bool) -> None:
         st.session_state.resume_markdown = result.resume_markdown
         st.session_state.output_path = result.output_path
     st.session_state.agent_trace = result.agent_trace
+    save_conversation_log("turn_complete")
 
 
 def render_resume_result() -> None:

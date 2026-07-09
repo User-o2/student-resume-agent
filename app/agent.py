@@ -52,6 +52,7 @@ CITY_KEYWORDS = (
     "远程",
 )
 ROLE_KEYWORDS = (
+    "人工智能算法实习生",
     "Python 后端实习",
     "后端开发实习",
     "算法实习",
@@ -92,6 +93,94 @@ TECH_KEYWORDS = (
     "Streamlit",
 )
 GRADE_KEYWORDS = ("大一", "大二", "大三", "大四", "研一", "研二", "研三", "本科", "硕士", "博士")
+
+
+def _has_personal_signal(text: str) -> bool:
+    """判断文本是否明确包含个人信息字段。
+
+    Args:
+        text: 用户输入。
+
+    Returns:
+        是否包含个人信息信号。
+    """
+
+    return bool(re.search(r"(姓名|我叫|电话|手机号|邮箱|籍贯|家乡)", text))
+
+
+def _has_education_signal(text: str) -> bool:
+    """判断文本是否明确包含教育背景字段。
+
+    Args:
+        text: 用户输入。
+
+    Returns:
+        是否包含教育背景信号。
+    """
+
+    return bool(re.search(r"(学校|院校|毕业院校|学院|专业(?:是|为|[:：])|主修课程|核心课程|专业排名|成绩排名|GPA|英语水平|CET|英语[四六四6]级)", text))
+
+
+def _has_skill_signal(text: str) -> bool:
+    """判断文本是否明确包含技术栈或技能字段。
+
+    Args:
+        text: 用户输入。
+
+    Returns:
+        是否包含技能字段信号。
+    """
+
+    return bool(re.search(r"(技术栈|技能|熟悉|掌握|会使用|使用过|工具|框架|编程语言|开发语言)", text))
+
+
+def _has_award_signal(text: str, stage: str = "") -> bool:
+    """判断文本是否明确包含竞赛获奖字段。
+
+    Args:
+        text: 用户输入。
+        stage: 当前对话阶段。
+
+    Returns:
+        是否包含竞赛获奖信号。
+    """
+
+    if stage in {"awards", "skills_awards"}:
+        return True
+    return bool(re.search(r"(竞赛获奖|获奖|奖项|奖学金|证书|一等奖|二等奖|三等奖|Top\s*\d+%|前\s*\d+%)", text, flags=re.IGNORECASE))
+
+
+def _has_job_signal(text: str) -> bool:
+    """判断文本是否明确包含求职意向字段。
+
+    Args:
+        text: 用户输入。
+
+    Returns:
+        是否包含求职意向信号。
+    """
+
+    return bool(re.search(r"(求职意向|目标岗位|目标行业|期望城市|岗位|行业|城市|投递|应聘|申请|实习)", text))
+
+
+def _has_project_signal(text: str, stage: str = "") -> bool:
+    """判断文本是否明确包含项目经历字段。
+
+    Args:
+        text: 用户输入。
+        stage: 当前对话阶段。
+
+    Returns:
+        是否包含项目经历信号。
+    """
+
+    if stage == "projects":
+        return True
+    if _has_award_signal(text, stage):
+        return False
+    explicit_project = re.search(r"(项目经历|项目名称|项目[:：])", text)
+    product_like = re.search(r"([\u4e00-\u9fa5A-Za-z0-9]+(?:平台|系统|网站|小程序|应用))", text)
+    return bool(explicit_project or product_like)
 
 
 @dataclass
@@ -296,7 +385,7 @@ def _extract_common_fields(text: str) -> dict[str, Any]:
     if native_match:
         basic["native_place"] = native_match.group(1).strip()
 
-    university_match = re.search(r"([\u4e00-\u9fa5A-Za-z]+大学)", text)
+    university_match = re.search(r"([\u4e00-\u9fa5A-Za-z]+大学)(?!生)", text)
     if university_match:
         basic["university"] = university_match.group(1)
         education["school"] = university_match.group(1)
@@ -320,7 +409,7 @@ def _extract_common_fields(text: str) -> dict[str, Any]:
         basic["major"] = major
         education["major"] = major
     else:
-        suffix_major_match = re.search(r"([\u4e00-\u9fa5A-Za-z0-9+\-]{2,30}专业)", text)
+        suffix_major_match = re.search(r"([\u4e00-\u9fa5A-Za-z0-9+\-]{2,30}专业)(?!前|排名|综合)", text)
         if suffix_major_match:
             major = suffix_major_match.group(1).removesuffix("专业")
             university = basic.get("university")
@@ -334,16 +423,24 @@ def _extract_common_fields(text: str) -> dict[str, Any]:
             basic["grade"] = grade
             break
 
-    course_match = re.search(r"(?:主修课程|课程)(?:包括|有|是|为|[:：])?(.+)", text)
+    course_match = re.search(r"(?:主修课程|核心课程|课程)(?:包括|有|是|为|[:：])?(.+)", text)
     if course_match:
-        education["courses"] = _split_cn_items(course_match.group(1))[:8]
+        course_text = re.split(r"(?:技术栈|技能|专业排名|成绩排名|英语水平)[:：]?", course_match.group(1))[0]
+        education["courses"] = _split_cn_items(course_text)[:8]
 
-    rank_match = re.search(r"(GPA[:：]?\s*[\d.]+|排名[:：]?\s*前?\s*\d+%?|绩点[:：]?\s*[\d.]+|成绩[:：]?\s*[^，,。]+)", text)
+    rank_match = re.search(
+        r"(?:专业排名|成绩排名|排名)[:：]?\s*([^。；;\n]+?)(?=\s*(?:英语水平|英语[四六四6]级|CET|核心课程|主修课程|技术栈|技能)[:：]?|$)",
+        text,
+    )
     if rank_match:
-        education["gpa_or_rank"] = rank_match.group(1).strip()
+        education["gpa_or_rank"] = rank_match.group(1).strip(" ，,。；;")
+    else:
+        gpa_match = re.search(r"(GPA[:：]?\s*[\d.]+(?:/\d(?:\.\d)?)?|绩点[:：]?\s*[\d.]+)", text)
+        if gpa_match:
+            education["gpa_or_rank"] = gpa_match.group(1).strip()
 
     english_matches = re.findall(
-        r"(?:CET-?\s*[46]\s*\d{0,3}|英语[四六四6]级\s*\d{0,3}|雅思\s*\d(?:\.\d)?|托福\s*\d+)",
+        r"(?:CET-?\s*[46]\s*\d{0,3}分?|英语[四六四6]级\s*\d{0,3}分?|雅思\s*\d(?:\.\d)?|托福\s*\d+)",
         text,
         flags=re.IGNORECASE,
     )
@@ -371,18 +468,29 @@ def _extract_job_intention(text: str) -> dict[str, Any]:
     cities = _find_keywords(text, CITY_KEYWORDS)
     roles = _find_keywords(text, ROLE_KEYWORDS)
 
-    if roles:
+    labeled_position = re.search(r"目标岗位[:：]?\s*([^。；;\n]+?)(?=\s*目标行业[:：]|期望城市[:：]|$)", text)
+    labeled_industry = re.search(r"目标行业[:：]?\s*([^。；;\n]+?)(?=\s*目标岗位[:：]|期望城市[:：]|$)", text)
+    labeled_city = re.search(r"期望城市[:：]?\s*([^。；;\n]+?)(?=\s*目标岗位[:：]|目标行业[:：]|$)", text)
+
+    if labeled_position:
+        job["target_position"] = labeled_position.group(1).strip(" ，,。；;")
+    elif roles:
         job["target_position"] = roles[0]
     else:
         position_match = re.search(r"(?:投递|投|应聘|申请|想做|目标岗位(?:是|为)?)([^，,。；;]+)", text)
         if position_match:
             job["target_position"] = position_match.group(1).strip()
 
-    if cities:
+    if labeled_city:
+        job["expected_city"] = labeled_city.group(1).strip(" ，,。；;")
+    elif cities:
         job["expected_city"] = cities[0]
-    industry_match = re.search(r"(互联网|人工智能|金融科技|教育科技|制造业|游戏|电商)", text)
-    if industry_match:
-        job["target_industry"] = industry_match.group(1)
+    if labeled_industry:
+        job["target_industry"] = labeled_industry.group(1).strip(" ，,。；;")
+    else:
+        industry_match = re.search(r"(互联网|人工智能|金融科技|教育科技|制造业|游戏|电商)", text)
+        if industry_match:
+            job["target_industry"] = industry_match.group(1)
     return {"job_intention": job} if job else {}
 
 
@@ -448,12 +556,22 @@ def _extract_skills_and_awards(text: str) -> dict[str, Any]:
     tools = [item for item in technologies if item not in set(programming)]
 
     skills: dict[str, Any] = {}
-    if programming:
-        skills["programming_languages"] = programming
-    if tools:
-        skills["tools"] = tools
-    if any(keyword in text for keyword in ("数据分析", "机器学习", "后端开发", "接口设计", "数据库", "深度学习")):
-        skills["professional_skills"] = _split_cn_items(text)[:8]
+    if _has_skill_signal(text):
+        if programming:
+            skills["programming_languages"] = programming
+        if tools:
+            skills["tools"] = tools
+        skill_match = re.search(r"(?:技术栈|技能|专业技能)(?:包括|有|是|为|[:：])?(.+)", text)
+        if skill_match:
+            skill_text = re.split(r"(?:竞赛|获奖|奖学金|证书|项目经历|自我评价)[:：]?", skill_match.group(1))[0]
+            professional_items = [
+                item
+                for item in _split_cn_items(skill_text)[:10]
+                if item not in set(programming + tools)
+                and not re.search(r"(专业排名|英语水平|核心课程|主修课程|GPA)", item)
+            ]
+            if professional_items:
+                skills["professional_skills"] = professional_items
     language_match = re.search(r"(英语[四六六四]级|CET-?[46]|雅思\d(?:\.\d)?|托福\d+)", text, flags=re.IGNORECASE)
     if language_match:
         skills["languages"] = [language_match.group(1)]
@@ -503,26 +621,33 @@ def _heuristic_extract_update(text: str, state: ResumeState) -> dict[str, Any]:
     stage = state.current_stage
 
     if stage in {"personal_info", "job_intention"}:
-        update = _merge_patch(update, _extract_job_intention(text))
+        if _has_job_signal(text):
+            update = _merge_patch(update, _extract_job_intention(text))
     elif stage in {"education", "basic_education"}:
-        update = _merge_patch(update, _extract_skills_and_awards(text))
+        if _has_skill_signal(text):
+            update = _merge_patch(update, _extract_skills_and_awards(text))
     elif stage == "projects":
         update = _merge_patch(update, _extract_experience(text, "projects"))
     elif stage in {"awards", "skills_awards"}:
         update = _merge_patch(update, _extract_skills_and_awards(text))
     elif stage == "self_evaluation":
-        update["self_evaluation"] = text.strip()
+        if _has_project_signal(text, stage):
+            update = _merge_patch(update, _extract_experience(text, "projects"))
+        elif _has_award_signal(text, stage):
+            update = _merge_patch(update, _extract_skills_and_awards(text))
+        else:
+            update["self_evaluation"] = text.strip()
     else:
         update = _merge_patch(update, _extract_job_intention(text))
         update = _merge_patch(update, _extract_skills_and_awards(text))
 
-    if any(keyword in text for keyword in ("岗位", "投", "应聘", "实习", "城市")):
+    if stage != "self_evaluation" and _has_job_signal(text):
         update = _merge_patch(update, _extract_job_intention(text))
-    if any(keyword in text for keyword in ("项目", "平台", "系统", "模型", "算法", "网站", "小程序", "应用")):
+    if stage != "self_evaluation" and _has_project_signal(text, stage):
         update = _merge_patch(update, _extract_experience(text, "projects"))
-    if any(keyword in text for keyword in ("竞赛", "比赛", "获奖", "奖学金", "证书")):
+    if stage != "self_evaluation" and _has_award_signal(text, stage):
         update = _merge_patch(update, _extract_skills_and_awards(text))
-    if any(keyword in text for keyword in ("实践", "课题", "社团")) and stage not in {"personal_info", "job_intention"}:
+    if stage != "self_evaluation" and _has_project_signal(text, stage) and any(keyword in text for keyword in ("实践", "课题", "社团")):
         update = _merge_patch(update, _extract_experience(text, "projects"))
     return _compact_patch(parse_json_object(json.dumps(update, ensure_ascii=False))) or {}
 
@@ -565,6 +690,46 @@ def _llm_extract_update(text: str, state: ResumeState, llm: BaseChatModel | None
         return parse_json_object(str(content))
     except Exception:
         return {}
+
+
+def _apply_update_guards(user_input: str, previous_state: ResumeState, updated_state: ResumeState) -> ResumeState:
+    """按当前用户输入显式意图保护已维护的结构化状态。
+
+    Args:
+        user_input: 用户本轮输入。
+        previous_state: 更新前状态。
+        updated_state: 工具或抽取逻辑更新后的状态。
+
+    Returns:
+        经过服务端校验后的状态。
+    """
+
+    guarded = updated_state.model_copy(deep=True)
+    stage = previous_state.current_stage
+
+    if not _has_personal_signal(user_input):
+        guarded.basic_info.name = previous_state.basic_info.name
+        guarded.basic_info.phone = previous_state.basic_info.phone
+        guarded.basic_info.email = previous_state.basic_info.email
+        guarded.basic_info.native_place = previous_state.basic_info.native_place
+
+    if not _has_education_signal(user_input):
+        guarded.education = previous_state.education.model_copy(deep=True)
+        guarded.basic_info.university = previous_state.basic_info.university
+        guarded.basic_info.major = previous_state.basic_info.major
+        guarded.basic_info.grade = previous_state.basic_info.grade
+
+    if not _has_skill_signal(user_input):
+        guarded.skills = previous_state.skills.model_copy(deep=True)
+
+    if not _has_project_signal(user_input, stage):
+        guarded.projects = [item.model_copy(deep=True) for item in previous_state.projects]
+
+    if not _has_award_signal(user_input, stage):
+        guarded.awards = [item.model_copy(deep=True) for item in previous_state.awards]
+
+    guarded.touch()
+    return guarded
 
 
 def _has_missing_prefix(report: dict[str, Any], prefix: str) -> bool:
@@ -750,8 +915,10 @@ class ResumeAgentService:
         previous_stage = resume_state.current_stage
 
         if user_input.strip():
+            previous_state = resume_state.model_copy(deep=True)
             update = self.extract_update(user_input, resume_state)
             resume_state = collect_resume_info(resume_state, update)
+            resume_state = _apply_update_guards(user_input, previous_state, resume_state)
 
         report = check_missing_fields(resume_state)
         resume_state = _sync_stage(resume_state, previous_stage, report)
@@ -818,24 +985,30 @@ class ResumeAgentService:
             return None
         payload_state = payload.get("state_json") if isinstance(payload, dict) else ""
         updated_state = coerce_resume_state(payload_state or tool_state or state)
+        updated_state = _apply_update_guards(user_input, state, updated_state)
+        heuristic_update = _heuristic_extract_update(user_input, state)
+        if heuristic_update:
+            updated_state = collect_resume_info(updated_state, heuristic_update)
+            updated_state = _apply_update_guards(user_input, state, updated_state)
         previous_stage = state.current_stage
-        report = tool_report or check_missing_fields(updated_state)
+        report = check_missing_fields(updated_state)
         updated_state = _sync_stage(updated_state, previous_stage, report)
         report = check_missing_fields(updated_state)
 
+        should_generate = _contains_generate_intent(user_input)
         generated_markdown = ""
         output_path = ""
-        if tool_resume:
+        if should_generate and tool_resume:
             generated_markdown = str(tool_resume.get("markdown", ""))
             output_path = str(tool_resume.get("output_path", ""))
-        elif payload.get("resume_markdown"):
+        elif should_generate and payload.get("resume_markdown"):
             generated_markdown = str(payload.get("resume_markdown", ""))
             output_path = str(payload.get("output_path", ""))
 
         if output_path and not generated_markdown:
             generated_markdown = self._read_generated_markdown(output_path)
 
-        if _contains_generate_intent(user_input) and report["is_ready"] and not output_path:
+        if should_generate and report["is_ready"] and not output_path:
             result = fill_resume_template(updated_state)
             generated_markdown = result["markdown"]
             output_path = result["output_path"]
