@@ -277,6 +277,32 @@ def _has_any_skill(state: ResumeState) -> bool:
     )
 
 
+def _has_required_contact(state: ResumeState) -> bool:
+    """判断是否已有至少一种联系方式。
+
+    Args:
+        state: 当前简历状态。
+
+    Returns:
+        是否包含邮箱或手机号。
+    """
+
+    return bool(state.basic_info.email or state.basic_info.phone)
+
+
+def _has_required_education(state: ResumeState) -> bool:
+    """判断教育背景是否达到生成简历的最低要求。
+
+    Args:
+        state: 当前简历状态。
+
+    Returns:
+        是否有主修课程或成绩排名。
+    """
+
+    return bool(state.education.courses or state.education.gpa_or_rank)
+
+
 def _experience_quality_questions(experience: Experience, category: str) -> list[str]:
     """生成经历完整度追问。
 
@@ -349,34 +375,40 @@ def check_missing_fields(state: ResumeState | Mapping[str, Any] | str | None) ->
 
     if not resume_state.job_intention.target_position:
         missing_fields.append("求职意向：目标岗位")
+    if not resume_state.job_intention.target_industry:
+        optional_suggestions.append("可补充目标行业，让简历表达更聚焦。")
     if not resume_state.job_intention.expected_city:
-        missing_fields.append("求职意向：期望城市")
+        optional_suggestions.append("可补充期望城市，便于生成完整求职意向。")
     if not resume_state.basic_info.name:
         missing_fields.append("基本信息：姓名")
     if not resume_state.basic_info.university:
         missing_fields.append("基本信息：学校")
     if not resume_state.basic_info.major:
         missing_fields.append("基本信息：专业")
-    if not resume_state.basic_info.email:
-        missing_fields.append("基本信息：邮箱")
-    if not resume_state.education.courses and not resume_state.education.gpa_or_rank:
+    if not resume_state.basic_info.grade:
+        missing_fields.append("基本信息：年级")
+    if not _has_required_contact(resume_state):
+        missing_fields.append("基本信息：邮箱或手机号")
+    if not _has_required_education(resume_state):
         missing_fields.append("教育背景：主修课程或成绩排名")
     meaningful_projects = _meaningful_experiences(resume_state.projects)
-    if not meaningful_projects:
-        missing_fields.append("项目经历：至少 1 段项目")
-    else:
+    if meaningful_projects:
         quality_questions.extend(_experience_quality_questions(meaningful_projects[0], "项目经历"))
+    else:
+        optional_suggestions.append("建议补充至少 1 段项目、实习、科研或竞赛经历，用来支撑简历主体。")
     if not _has_any_skill(resume_state):
-        missing_fields.append("技能特长：至少 1 类技能")
+        optional_suggestions.append("建议补充技能特长，例如编程语言、框架、工具或专业能力。")
     if not resume_state.self_evaluation:
-        missing_fields.append("自我评价：个人优势与发展方向")
+        optional_suggestions.append("可补充 1-2 句自我评价，突出优势和方向。")
     if not resume_state.internships and not resume_state.internship_note:
         optional_suggestions.append("可补充实习、课程实践、社团实践或说明暂无正式实习。")
     if not resume_state.awards:
         optional_suggestions.append("可补充竞赛奖项、奖学金、证书或说明暂无。")
 
     return {
-        "is_ready": not missing_fields and not quality_questions,
+        "is_ready": not missing_fields,
+        "can_generate": not missing_fields,
+        "required_missing_fields": missing_fields,
         "missing_fields": missing_fields,
         "quality_questions": quality_questions,
         "optional_suggestions": optional_suggestions,

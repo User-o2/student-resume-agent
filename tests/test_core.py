@@ -43,8 +43,8 @@ class ResumeToolTestCase(unittest.TestCase):
         self.assertEqual(state.projects[0].technologies, ["Python"])
         self.assertEqual(state.projects[0].results, ["完成 18 个接口"])
 
-    def test_check_missing_fields_reports_project_quality(self) -> None:
-        """验证项目描述过于简单时会触发质量追问。"""
+    def test_check_missing_fields_reports_project_quality_without_blocking_generation(self) -> None:
+        """验证项目质量追问不会阻塞已满足必填字段的简历生成。"""
 
         state = collect_resume_info(
             ResumeState(),
@@ -53,9 +53,10 @@ class ResumeToolTestCase(unittest.TestCase):
                     "name": "李明",
                     "university": "浙江工业大学",
                     "major": "计算机科学与技术",
+                    "grade": "大三",
                     "email": "liming@example.com",
                 },
-                "job_intention": {"target_position": "Python 后端实习", "expected_city": "杭州"},
+                "job_intention": {"target_position": "Python 后端实习"},
                 "education": {"courses": ["数据结构"]},
                 "projects": [{"title": "图像识别项目", "raw_description": "我做过一个图像识别项目"}],
                 "skills": {"programming_languages": ["Python"]},
@@ -64,8 +65,30 @@ class ResumeToolTestCase(unittest.TestCase):
         )
 
         report = check_missing_fields(state)
-        self.assertFalse(report["is_ready"])
+        self.assertTrue(report["is_ready"])
         self.assertTrue(report["quality_questions"])
+
+    def test_check_missing_fields_blocks_only_required_fields(self) -> None:
+        """验证只有必填字段缺失时才阻塞生成。"""
+
+        state = collect_resume_info(
+            ResumeState(),
+            {
+                "basic_info": {
+                    "name": "李明",
+                    "university": "浙江工业大学",
+                    "major": "计算机科学与技术",
+                },
+                "job_intention": {"target_position": "Python 后端实习"},
+            },
+        )
+
+        report = check_missing_fields(state)
+
+        self.assertFalse(report["is_ready"])
+        self.assertIn("基本信息：年级", report["missing_fields"])
+        self.assertIn("基本信息：邮箱或手机号", report["missing_fields"])
+        self.assertIn("教育背景：主修课程或成绩排名", report["missing_fields"])
 
     def test_collect_resume_info_merges_untitled_project_supplements(self) -> None:
         """验证无标题项目补充会合并到上一段项目。"""
@@ -107,9 +130,10 @@ class ResumeToolTestCase(unittest.TestCase):
                     "name": "小明",
                     "university": "天津科技大学",
                     "major": "人工智能",
+                    "grade": "大三",
                     "email": "27485938@qq.com",
                 },
-                "job_intention": {"target_position": "Python 后端实习", "expected_city": "杭州"},
+                "job_intention": {"target_position": "Python 后端实习"},
                 "education": {"courses": ["机器学习"], "gpa_or_rank": "3/105"},
                 "projects": [
                     {},

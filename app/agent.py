@@ -477,6 +477,10 @@ def _heuristic_extract_update(text: str, state: ResumeState) -> dict[str, Any]:
 
     if any(keyword in text for keyword in ("岗位", "投", "应聘", "实习", "城市")):
         update = _merge_patch(update, _extract_job_intention(text))
+    if any(keyword in text for keyword in ("项目", "平台", "系统", "模型", "算法", "网站", "小程序", "应用")):
+        update = _merge_patch(update, _extract_experience(text, "projects"))
+    if any(keyword in text for keyword in ("实习", "实践", "课题", "竞赛", "社团")) and stage not in {"job_intention"}:
+        update = _merge_patch(update, _extract_experience(text, "internships"))
     return _compact_patch(parse_json_object(json.dumps(update, ensure_ascii=False))) or {}
 
 
@@ -535,7 +539,8 @@ def _has_basic_education_gap(state: ResumeState) -> bool:
             not state.basic_info.name,
             not state.basic_info.university,
             not state.basic_info.major,
-            not state.basic_info.email,
+            not state.basic_info.grade,
+            not (state.basic_info.email or state.basic_info.phone),
             not state.education.courses and not state.education.gpa_or_rank,
         ]
     )
@@ -581,18 +586,10 @@ def _sync_stage(state: ResumeState, previous_stage: str, report: dict[str, Any])
         更新阶段后的简历状态。
     """
 
-    if not state.job_intention.target_position or not state.job_intention.expected_city:
+    if not state.job_intention.target_position:
         state.current_stage = "job_intention"
     elif _has_basic_education_gap(state):
         state.current_stage = "basic_education"
-    elif _has_project_gap(report):
-        state.current_stage = "projects"
-    elif previous_stage in {"projects", "internships"} and not state.internships and not state.internship_note:
-        state.current_stage = "internships"
-    elif _has_skill_gap(report):
-        state.current_stage = "skills_awards"
-    elif not state.self_evaluation:
-        state.current_stage = "self_evaluation"
     else:
         state.current_stage = "ready"
     state.touch()
@@ -610,12 +607,27 @@ def build_followup_question(state: ResumeState, report: dict[str, Any]) -> str:
         下一轮对用户的追问文本。
     """
 
+    missing_fields = report.get("missing_fields", [])
+    optional_suggestions = report.get("optional_suggestions", [])
+    quality_questions = report.get("quality_questions", [])
+
     if state.current_stage == "job_intention":
-        return "请先补充求职意向：目标岗位、目标行业或方向、期望城市。例如：Python 后端实习，互联网行业，杭州。"
+        return "请先补充目标岗位，这是生成简历的必要信息。也可以顺带说明目标行业或期望城市。"
     if state.current_stage == "basic_education":
-        return "请补充基本信息和教育背景：姓名、学校、专业、年级、邮箱，以及主修课程或成绩排名。"
+        basic_missing = [
+            item.replace("基本信息：", "")
+            for item in missing_fields
+            if item.startswith("基本信息：")
+        ]
+        education_missing = [
+            item.replace("教育背景：", "")
+            for item in missing_fields
+            if item.startswith("教育背景：")
+        ]
+        parts = basic_missing + education_missing
+        focus = "、".join(parts[:4]) if parts else "姓名、学校、专业、年级、联系方式、主修课程或成绩排名"
+        return f"请先补充必要信息：{focus}。这些信息完成后即可生成简历，其他项目、实习、奖项可以后续优化。"
     if state.current_stage == "projects":
-        quality_questions = report.get("quality_questions", [])
         if quality_questions:
             return quality_questions[0]
         return "请介绍 1 段项目经历，尽量包含项目名称、时间、技术栈、个人职责和项目成果。"
@@ -625,7 +637,11 @@ def build_followup_question(state: ResumeState, report: dict[str, Any]) -> str:
         return "请补充技能和荣誉奖项，包括编程语言、框架工具、专业技能、语言能力、竞赛奖项、奖学金或证书。"
     if state.current_stage == "self_evaluation":
         return "请补充自我评价，重点说明个人优势、职业兴趣和发展方向，控制在 2-4 句话。"
-    return "信息已基本完整。回复“生成简历”即可输出 Markdown 简历；也可以继续补充需要强调的内容。"
+    if quality_questions:
+        return f"必要信息已完整，可以回复“生成简历”。如果想继续优化，建议先补充：{quality_questions[0]}"
+    if optional_suggestions:
+        return f"必要信息已完整，可以回复“生成简历”。如果想继续优化，建议先补充：{optional_suggestions[0]}"
+    return "必要信息已完整。回复“生成简历”即可输出 Markdown 简历，也可以继续补充需要强调的内容。"
 
 
 class ResumeAgentService:
@@ -732,7 +748,7 @@ class ResumeAgentService:
 
         if _contains_generate_intent(user_input):
             if not report["is_ready"]:
-                missing_text = "；".join(report["missing_fields"] + report["quality_questions"])
+                missing_text = "；".join(report["missing_fields"])
                 message = f"现在还不能生成完整简历，仍需补充：{missing_text}\n\n{build_followup_question(resume_state, report)}"
                 return AgentTurnResult(message, resume_state, report, agent_trace=["fallback: controlled_flow"])
 
@@ -815,7 +831,9 @@ class ResumeAgentService:
             trace.append("服务端补偿执行：fill_resume_template")
 
         assistant_message = str(payload.get("assistant_message") or "").strip()
-        if not assistant_message:
+        if not generated_markdown:
+            assistant_message = build_followup_question(updated_state, report)
+        elif not assistant_message:
             assistant_message = build_followup_question(updated_state, report)
 
         if generated_markdown and output_path:

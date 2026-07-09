@@ -102,6 +102,10 @@ def render_sidebar(use_llm: bool) -> None:
         st.sidebar.subheader("质量追问")
         for item in report["quality_questions"][:3]:
             st.sidebar.write(f"- {item}")
+    if report.get("optional_suggestions"):
+        st.sidebar.subheader("建议优化")
+        for item in report["optional_suggestions"][:3]:
+            st.sidebar.write(f"- {item}")
 
     with st.sidebar.expander("结构化状态", expanded=False):
         st.json(json.loads(state.model_dump_json()))
@@ -174,7 +178,7 @@ def process_pending_message(use_llm: bool) -> None:
 
 
 def render_resume_result() -> None:
-    """渲染生成后的 Markdown 简历。
+    """渲染生成后的 Markdown 下载区域。
 
     Args:
         无。
@@ -187,7 +191,7 @@ def render_resume_result() -> None:
         return
 
     st.divider()
-    st.subheader("Markdown 简历")
+    st.subheader("Markdown 文件")
     st.caption(st.session_state.output_path)
     st.download_button(
         label="下载 Markdown",
@@ -196,7 +200,6 @@ def render_resume_result() -> None:
         mime="text/markdown",
         use_container_width=True,
     )
-    st.markdown(st.session_state.resume_markdown)
 
 
 def main() -> None:
