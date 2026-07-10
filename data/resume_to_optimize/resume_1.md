@@ -10,11 +10,11 @@
 - **专业排名**：前15%（GPA 3.7/4.0）
 - **英语水平**：CET-4 560分 | CET-6 540分
 - **核心课程**：机器学习，深度学习，数据结构与算法，概率论与数理统计
-- **技术栈**：Python, C++, PyTorch, Linux, Git, LaTeX, Flask
+- **技术栈**：Python, C++, PyTorch, Linux, Git, LaTeX
 
 ## 项目经历
 **基于轻量级CNN的手写数字识别系统**
-- 负责数据清洗与增强，使用TensorFlow/Keras搭建MobileNetV2变体，最终在测试集上准确率99.1%
+- 负责数据清洗与增强，使用TensorFlow/Keras搭建MobileNetV2变体，最终在测试集上准确率99.1%，响应时间低于200ms
 - 数据清洗与增强
 - 搭建MobileNetV2变体模型
 - 封装为Flask接口，支持图片上传识别
@@ -31,3 +31,4 @@
 
 ## 自我评价
 - 对计算机视觉与模型轻量化有兴趣
+- 认真学习
