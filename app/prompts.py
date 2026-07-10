@@ -88,7 +88,7 @@ IMPORT_RESUME_USER_PROMPT = """## 已有 Markdown 简历
 
 RESUME_SCORE_SYSTEM_PROMPT = """你是学生求职简历评分专家。
 
-你的任务是基于 ResumeState、底线校验报告和目标岗位，对简历进行评分：
+你的任务是基于原始 Markdown 简历、ResumeState、底线校验报告和目标岗位，对简历进行评分：
 1. 匹配度：评价教育背景、技能、项目、奖项、自我评价是否贴合目标岗位
 2. 表达规范性：评价经历 bullet 是否具体、正式、无重复、是否体现职责/方法/成果
 3. 优势：列出 2-4 条已经做得好的地方
@@ -98,10 +98,14 @@ RESUME_SCORE_SYSTEM_PROMPT = """你是学生求职简历评分专家。
 要求：
 - 不要编造简历中没有的经历、成绩或奖项
 - 评分应严格但鼓励改进
+- 表达规范性优先依据原始 Markdown 中的真实标题、项目要点和表述，而不是补全或改写后的内容
 - 只返回结构化 ResumeScoreReport，不要输出 Markdown
 """
 
-RESUME_SCORE_USER_PROMPT = """## ResumeState JSON
+RESUME_SCORE_USER_PROMPT = """## 原始 Markdown 简历
+{source_markdown}
+
+## ResumeState JSON
 {state_json}
 
 ## 底线校验报告 JSON

@@ -58,6 +58,8 @@ def init_session_state() -> None:
         st.session_state.word_output_path = ""
     if "score_markdown" not in st.session_state:
         st.session_state.score_markdown = ""
+    if "score_source_name" not in st.session_state:
+        st.session_state.score_source_name = ""
     if "output_path" not in st.session_state:
         st.session_state.output_path = ""
     if "agent_trace" not in st.session_state:
@@ -93,6 +95,7 @@ def save_conversation_log(event: str = "turn_complete") -> None:
         "has_resume_markdown": bool(st.session_state.resume_markdown),
         "word_output_path": st.session_state.word_output_path,
         "score_markdown": st.session_state.score_markdown,
+        "score_source_name": st.session_state.score_source_name,
     }
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
@@ -132,6 +135,7 @@ def reset_session() -> None:
     st.session_state.word_document = b""
     st.session_state.word_output_path = ""
     st.session_state.score_markdown = ""
+    st.session_state.score_source_name = ""
     st.session_state.output_path = ""
     st.session_state.agent_trace = []
     st.session_state.agent_trace_history = []
@@ -307,7 +311,7 @@ def render_existing_resume_upload(use_llm: bool) -> None:
 
 
 def render_resume_score_panel(use_llm: bool) -> None:
-    """渲染简历评分区域。
+    """渲染上传 Markdown 简历的评分区域。
 
     Args:
         use_llm: 是否启用 LLM 评分。
@@ -316,34 +320,58 @@ def render_resume_score_panel(use_llm: bool) -> None:
         None。
     """
 
-    with st.expander("简历评分", expanded=False):
-        state = st.session_state.resume_state
-        default_target = state.job_intention.target_position
+    with st.expander("上传简历评分", expanded=False):
+        uploaded_file = st.file_uploader(
+            "上传待评分的 Markdown 简历",
+            type=["md", "txt"],
+            accept_multiple_files=False,
+            key="score_resume_upload",
+        )
+        if uploaded_file is None:
+            st.caption("上传一份 Markdown 简历后，系统将评估完整度、岗位匹配度和表达规范性。")
+            if st.session_state.score_markdown:
+                st.caption(f"最近评分文件：{st.session_state.score_source_name}")
+                st.markdown(st.session_state.score_markdown)
+            return
+
+        st.caption(f"已选择：{uploaded_file.name}")
         target_position = st.text_input(
             "评分目标岗位",
-            value=default_target,
+            key="score_target_position",
             placeholder="例如：人工智能算法实习生、机械设计助理工程师",
         )
-        st.caption("评分包含完整度、岗位匹配度和表达规范性。完整度由代码计算，匹配度与表达由 LLM 评估。")
+        st.caption("留空时使用简历中的求职意向。完整度由代码计算，匹配度与表达由 LLM 评估。")
 
-        if st.button("开始评分", use_container_width=True):
+        if st.button("开始评分", use_container_width=True, key="score_uploaded_resume"):
+            try:
+                resume_text = uploaded_file.getvalue().decode("utf-8")
+            except UnicodeDecodeError:
+                st.error("文件编码无法识别，请上传 UTF-8 编码的 Markdown 文本。")
+                return
+
             service = get_agent_service(use_llm)
-            with st.spinner("正在生成评分报告..."):
-                result = service.score_resume(state, target_position=target_position)
+            try:
+                with st.spinner("正在解析简历并生成评分报告..."):
+                    result = service.score_existing_resume(resume_text, target_position=target_position)
+            except ValueError as error:
+                st.error(f"简历评分失败：{error}")
+                return
 
             st.session_state.score_markdown = result.markdown
+            st.session_state.score_source_name = uploaded_file.name
             st.session_state.agent_trace = result.agent_trace
             st.session_state.agent_trace_history.append(
                 {
                     "turn": len([message for message in st.session_state.messages if message["role"] == "user"]) + 1,
-                    "user_input": f"简历评分：{target_position or default_target or '未指定岗位'}",
+                    "user_input": f"上传简历评分：{uploaded_file.name}（{target_position or '使用简历求职意向'}）",
                     "trace": result.agent_trace,
                 }
             )
-            save_conversation_log("score_resume")
+            save_conversation_log("score_existing_resume")
             st.rerun()
 
         if st.session_state.score_markdown:
+            st.caption(f"最近评分文件：{st.session_state.score_source_name}")
             st.markdown(st.session_state.score_markdown)
 
 

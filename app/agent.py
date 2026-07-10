@@ -1056,12 +1056,14 @@ class ResumeAgentService:
         self,
         state: ResumeState | dict[str, Any] | str | None,
         target_position: str = "",
+        source_markdown: str = "",
     ) -> ResumeScoreResult:
-        """对当前简历进行评分。
+        """对结构化简历状态进行评分。
 
         Args:
-            state: 当前简历状态。
+            state: 待评分的结构化简历状态。
             target_position: 可选目标岗位；为空时使用状态中的目标岗位。
+            source_markdown: 可选的原始 Markdown 简历，用于表达规范性评估。
 
         Returns:
             简历评分结果。
@@ -1073,7 +1075,14 @@ class ResumeAgentService:
         target = target_position.strip() or resume_state.job_intention.target_position or "学生求职/实习"
         trace: list[str] = ["调用工具：validate_resume_state"]
 
-        score_report = self._score_resume_with_llm(resume_state, validation_report, completeness_score, target, trace)
+        score_report = self._score_resume_with_llm(
+            resume_state,
+            validation_report,
+            completeness_score,
+            target,
+            source_markdown,
+            trace,
+        )
         if score_report is None:
             score_report = _fallback_score_report(resume_state, completeness_score, validation_report)
             trace.append("fallback: score_resume")
@@ -1085,6 +1094,43 @@ class ResumeAgentService:
             markdown=_score_report_to_markdown(score_report),
             agent_trace=trace,
         )
+
+    def score_existing_resume(
+        self,
+        markdown_text: str,
+        target_position: str = "",
+    ) -> ResumeScoreResult:
+        """解析上传的 Markdown 简历并生成评分报告。
+
+        Args:
+            markdown_text: 待评分的 Markdown 简历内容。
+            target_position: 可选评分目标岗位；为空时使用简历中的求职意向。
+
+        Returns:
+            基于上传简历生成的评分报告。
+
+        Raises:
+            ValueError: 上传内容为空时抛出。
+        """
+
+        if not markdown_text.strip():
+            raise ValueError("上传的 Markdown 简历为空，无法评分。")
+
+        trace: list[str] = []
+        import_result = self._import_resume_with_llm(markdown_text, trace)
+        if import_result is None:
+            parsed_state = _parse_existing_resume_fallback(markdown_text)
+            trace.append("fallback: parse_existing_resume")
+        else:
+            parsed_state = import_result.state
+
+        score_result = self.score_resume(
+            parsed_state,
+            target_position=target_position,
+            source_markdown=markdown_text,
+        )
+        score_result.agent_trace = trace + score_result.agent_trace
+        return score_result
 
     def _decide_with_llm(
         self,
@@ -1208,6 +1254,7 @@ class ResumeAgentService:
         validation_report: dict[str, Any],
         completeness_score: int,
         target_position: str,
+        source_markdown: str,
         trace: list[str],
     ) -> ResumeScoreReport | None:
         """调用 LLM 生成简历评分报告。
@@ -1217,6 +1264,7 @@ class ResumeAgentService:
             validation_report: 底线校验报告。
             completeness_score: 代码计算的完整度分。
             target_position: 评分使用的目标岗位。
+            source_markdown: 上传的原始 Markdown 简历内容。
             trace: 执行轨迹列表。
 
         Returns:
@@ -1224,6 +1272,7 @@ class ResumeAgentService:
         """
 
         prompt_payload = {
+            "source_markdown": source_markdown.strip() or "未提供原始 Markdown，仅依据结构化状态评分。",
             "state_json": state.model_dump_json(ensure_ascii=False),
             "validation_report": json.dumps(validation_report, ensure_ascii=False),
             "completeness_score": str(completeness_score),

@@ -345,19 +345,45 @@ class ResumeAgentFlowTestCase(unittest.TestCase):
         self.assertIn("图像识别系统", result.markdown)
         self.assertTrue(Path(result.output_path).name.endswith("optimized.md"))
 
-    def test_score_resume_offline_returns_markdown_report(self) -> None:
-        """验证简历评分在无 LLM 时也能返回 Markdown 报告。"""
+    def test_score_existing_resume_offline_returns_markdown_report(self) -> None:
+        """验证上传 Markdown 简历可以在无 LLM 时完成解析和评分。"""
 
         service = ResumeAgentService(use_llm=False, use_agent_driver=False)
-        state = build_ready_state()
+        markdown = """# 张明
 
-        result = service.score_resume(state, target_position="人工智能算法实习生")
+- **求职意向**：人工智能算法实习生 | 互联网 | 北京
+- **电话**：13800001234
+- **邮箱**：zhangming@edu.cn
+- **籍贯**：江苏南京
 
-        self.assertGreaterEqual(result.report.completeness_score, 90)
+## 教育背景
+南京大学 人工智能学院 人工智能专业
+- **专业排名**：前15%
+- **英语水平**：CET-6 540
+- **核心课程**：机器学习，深度学习
+- **技术栈**：Python, PyTorch, Flask
+
+## 项目经历
+**图像识别系统**
+- 负责数据清洗与模型训练
+- 测试集准确率99.1%
+
+## 竞赛获奖
+**数学建模竞赛省级一等奖**
+- 团队排名前8%
+
+## 自我评价
+- 对计算机视觉有兴趣
+"""
+
+        result = service.score_existing_resume(markdown, target_position="人工智能算法实习生")
+
+        self.assertGreater(result.report.completeness_score, 0)
         self.assertGreater(result.report.total_score, 0)
         self.assertIn("## 简历评分报告", result.markdown)
         self.assertIn("岗位匹配度", result.markdown)
         self.assertIn("表达规范性", result.markdown)
+        self.assertIn("fallback: parse_existing_resume", result.agent_trace)
         self.assertIn("fallback: score_resume", result.agent_trace)
 
 
