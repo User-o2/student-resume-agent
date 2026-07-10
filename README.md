@@ -1,6 +1,6 @@
 # 学生简历生成智能体
 
-基于 Python、LangChain 和 Streamlit 的学生简历生成 Agent。项目第一阶段聚焦基础闭环：多轮信息采集、缺失字段追问、经历润色、Markdown 模板填充和结果保存。
+基于 Python、LangChain 和 Streamlit 的学生简历生成 Agent。
 
 ## 功能范围
 
@@ -39,12 +39,11 @@
 `.env` 使用以下字段：
 
 ```dotenv
-# 推荐：阿里云百炼官方 OpenAI 兼容接口
 office_base_url=https://你的业务空间ID.cn-beijing.maas.aliyuncs.com/compatible-mode/v1
 office_api_key=你的_阿里云百炼_API_Key
 office_model=qwen3.6-35b-a3b
 
-# 兼容旧配置：仅在没有 office_api_key 时使用
+# 兼容旧配置：
 base_url=https://example.com/v1/chat/completions
 api_key=你的_API_Key
 model=qwen3.6-35b-a3b
@@ -99,12 +98,3 @@ python scripts/generate_examples.py
 source ~/miniconda3/bin/activate && conda activate langchain
 python -m unittest discover -s tests
 ```
-
-## 当前阶段未纳入范围
-
-- 上传已有简历解析。
-- PDF/Word 导出。
-- 照片排版。
-- 多版本简历自动对比。
-
-这些属于后续加分功能，建议在基础闭环稳定后继续扩展。

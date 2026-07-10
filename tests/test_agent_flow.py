@@ -345,6 +345,21 @@ class ResumeAgentFlowTestCase(unittest.TestCase):
         self.assertIn("图像识别系统", result.markdown)
         self.assertTrue(Path(result.output_path).name.endswith("optimized.md"))
 
+    def test_score_resume_offline_returns_markdown_report(self) -> None:
+        """验证简历评分在无 LLM 时也能返回 Markdown 报告。"""
+
+        service = ResumeAgentService(use_llm=False, use_agent_driver=False)
+        state = build_ready_state()
+
+        result = service.score_resume(state, target_position="人工智能算法实习生")
+
+        self.assertGreaterEqual(result.report.completeness_score, 90)
+        self.assertGreater(result.report.total_score, 0)
+        self.assertIn("## 简历评分报告", result.markdown)
+        self.assertIn("岗位匹配度", result.markdown)
+        self.assertIn("表达规范性", result.markdown)
+        self.assertIn("fallback: score_resume", result.agent_trace)
+
 
 if __name__ == "__main__":
     unittest.main()

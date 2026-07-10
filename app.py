@@ -52,6 +52,8 @@ def init_session_state() -> None:
         ]
     if "resume_markdown" not in st.session_state:
         st.session_state.resume_markdown = ""
+    if "score_markdown" not in st.session_state:
+        st.session_state.score_markdown = ""
     if "output_path" not in st.session_state:
         st.session_state.output_path = ""
     if "agent_trace" not in st.session_state:
@@ -85,6 +87,7 @@ def save_conversation_log(event: str = "turn_complete") -> None:
         "agent_trace_history": st.session_state.agent_trace_history,
         "output_path": st.session_state.output_path,
         "has_resume_markdown": bool(st.session_state.resume_markdown),
+        "score_markdown": st.session_state.score_markdown,
     }
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
@@ -121,6 +124,7 @@ def reset_session() -> None:
         }
     ]
     st.session_state.resume_markdown = ""
+    st.session_state.score_markdown = ""
     st.session_state.output_path = ""
     st.session_state.agent_trace = []
     st.session_state.agent_trace_history = []
@@ -291,6 +295,47 @@ def render_existing_resume_upload(use_llm: bool) -> None:
         st.rerun()
 
 
+def render_resume_score_panel(use_llm: bool) -> None:
+    """渲染简历评分区域。
+
+    Args:
+        use_llm: 是否启用 LLM 评分。
+
+    Returns:
+        None。
+    """
+
+    with st.expander("简历评分", expanded=False):
+        state = st.session_state.resume_state
+        default_target = state.job_intention.target_position
+        target_position = st.text_input(
+            "评分目标岗位",
+            value=default_target,
+            placeholder="例如：人工智能算法实习生、机械设计助理工程师",
+        )
+        st.caption("评分包含完整度、岗位匹配度和表达规范性。完整度由代码计算，匹配度与表达由 LLM 评估。")
+
+        if st.button("开始评分", use_container_width=True):
+            service = get_agent_service(use_llm)
+            with st.spinner("正在生成评分报告..."):
+                result = service.score_resume(state, target_position=target_position)
+
+            st.session_state.score_markdown = result.markdown
+            st.session_state.agent_trace = result.agent_trace
+            st.session_state.agent_trace_history.append(
+                {
+                    "turn": len([message for message in st.session_state.messages if message["role"] == "user"]) + 1,
+                    "user_input": f"简历评分：{target_position or default_target or '未指定岗位'}",
+                    "trace": result.agent_trace,
+                }
+            )
+            save_conversation_log("score_resume")
+            st.rerun()
+
+        if st.session_state.score_markdown:
+            st.markdown(st.session_state.score_markdown)
+
+
 def render_resume_result() -> None:
     """渲染生成后的 Markdown 下载区域。
 
@@ -340,6 +385,7 @@ def main() -> None:
         st.rerun()
 
     render_existing_resume_upload(use_llm)
+    render_resume_score_panel(use_llm)
 
     user_input = st.chat_input("输入本轮补充的信息")
     if user_input:

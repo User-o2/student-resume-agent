@@ -24,6 +24,8 @@ from app.prompts import (
     FINAL_POLISH_USER_PROMPT,
     IMPORT_RESUME_SYSTEM_PROMPT,
     IMPORT_RESUME_USER_PROMPT,
+    RESUME_SCORE_SYSTEM_PROMPT,
+    RESUME_SCORE_USER_PROMPT,
     TURN_DECISION_SYSTEM_PROMPT,
     TURN_DECISION_USER_PROMPT,
 )
@@ -88,6 +90,19 @@ class ResumeImportResult(BaseModel):
     optimization_notes: list[str] = Field(default_factory=list, description="解析阶段发现的可优化问题。")
 
 
+class ResumeScoreReport(BaseModel):
+    """简历评分结构化报告。"""
+
+    completeness_score: int = Field(default=0, ge=0, le=100, description="完整度评分。")
+    match_score: int = Field(default=0, ge=0, le=100, description="岗位匹配度评分。")
+    expression_score: int = Field(default=0, ge=0, le=100, description="表达规范性评分。")
+    total_score: int = Field(default=0, ge=0, le=100, description="综合评分。")
+    strengths: list[str] = Field(default_factory=list, description="简历优势。")
+    weaknesses: list[str] = Field(default_factory=list, description="主要问题。")
+    suggestions: list[str] = Field(default_factory=list, description="优化建议。")
+    summary: str = Field(default="", description="评分总结。")
+
+
 @dataclass
 class AgentTurnResult:
     """单轮对话处理结果。
@@ -127,6 +142,21 @@ class ExistingResumeOptimizationResult:
     output_path: str
     summary: str
     missing_report: dict[str, Any]
+    agent_trace: list[str] = field(default_factory=list)
+
+
+@dataclass
+class ResumeScoreResult:
+    """简历评分结果。
+
+    Args:
+        report: 结构化评分报告。
+        markdown: Markdown 格式评分报告。
+        agent_trace: 执行轨迹。
+    """
+
+    report: ResumeScoreReport
+    markdown: str
     agent_trace: list[str] = field(default_factory=list)
 
 
@@ -222,6 +252,27 @@ def _build_import_agent(llm: BaseChatModel | None = None) -> Any | None:
         tools=[],
         system_prompt=IMPORT_RESUME_SYSTEM_PROMPT,
         response_format=ToolStrategy(ResumeImportResult),
+        checkpointer=InMemorySaver(),
+    )
+
+
+def _build_score_agent(llm: BaseChatModel | None = None) -> Any | None:
+    """构建简历评分 Agent。
+
+    Args:
+        llm: 聊天模型实例。
+
+    Returns:
+        使用 `ResumeScoreReport` 作为结构化输出的 Agent；模型不可用时返回 None。
+    """
+
+    if llm is None:
+        return None
+    return create_agent(
+        model=llm,
+        tools=[],
+        system_prompt=RESUME_SCORE_SYSTEM_PROMPT,
+        response_format=ToolStrategy(ResumeScoreReport),
         checkpointer=InMemorySaver(),
     )
 
@@ -450,6 +501,163 @@ def _parse_existing_resume_fallback(markdown_text: str) -> ResumeState:
         )
 
     return collect_resume_info(state, update)
+
+
+def _calculate_completeness_score(state: ResumeState, report: dict[str, Any]) -> int:
+    """计算简历完整度评分。
+
+    Args:
+        state: 当前简历状态。
+        report: 底线校验报告。
+
+    Returns:
+        0-100 的完整度分数。
+    """
+
+    checks = [
+        bool(state.basic_info.name),
+        bool(state.basic_info.phone),
+        bool(state.basic_info.email),
+        bool(state.basic_info.native_place),
+        bool(state.job_intention.target_position),
+        bool(state.job_intention.target_industry),
+        bool(state.job_intention.expected_city),
+        bool(state.education.school or state.basic_info.university),
+        bool(state.education.college),
+        bool(state.education.major or state.basic_info.major),
+        bool(state.education.courses),
+        bool(state.education.gpa_or_rank),
+        bool(state.education.english_level),
+        bool(state.skills.programming_languages or state.skills.tools or state.skills.professional_skills),
+        bool(state.projects),
+        any(project.technologies for project in state.projects),
+        any(project.responsibilities or project.polished_bullets for project in state.projects),
+        any(project.results or project.polished_bullets for project in state.projects),
+        bool(state.awards),
+        bool(state.self_evaluation),
+    ]
+    base_score = round(sum(checks) / len(checks) * 100)
+    penalty = min(len(report.get("validation_errors", [])) * 8, 20)
+    return max(0, min(100, base_score - penalty))
+
+
+def _normalize_score_report(report: ResumeScoreReport, completeness_score: int) -> ResumeScoreReport:
+    """规整评分报告并重算综合分。
+
+    Args:
+        report: 原始评分报告。
+        completeness_score: 代码计算的完整度分。
+
+    Returns:
+        规整后的评分报告。
+    """
+
+    normalized = report.model_copy(deep=True)
+    normalized.completeness_score = completeness_score
+    normalized.match_score = max(0, min(100, normalized.match_score))
+    normalized.expression_score = max(0, min(100, normalized.expression_score))
+    normalized.total_score = round(
+        normalized.completeness_score * 0.35
+        + normalized.match_score * 0.35
+        + normalized.expression_score * 0.30
+    )
+    return normalized
+
+
+def _fallback_score_report(state: ResumeState, completeness_score: int, report: dict[str, Any]) -> ResumeScoreReport:
+    """生成无 LLM 时的兜底评分报告。
+
+    Args:
+        state: 当前简历状态。
+        completeness_score: 代码计算的完整度分。
+        report: 底线校验报告。
+
+    Returns:
+        兜底评分报告。
+    """
+
+    match_score = 70
+    if state.job_intention.target_position and state.projects:
+        match_score += 10
+    if state.skills.programming_languages or state.skills.tools or state.skills.professional_skills:
+        match_score += 8
+    if state.awards:
+        match_score += 5
+    expression_score = 72
+    if any(project.polished_bullets for project in state.projects):
+        expression_score += 12
+    if report.get("quality_questions"):
+        expression_score -= min(len(report["quality_questions"]) * 5, 15)
+
+    weaknesses = list(report.get("missing_fields", []))[:3] or list(report.get("quality_questions", []))[:3]
+    if not weaknesses:
+        weaknesses = ["可继续补充更多量化成果或第二段项目经历，增强竞争力。"]
+
+    return _normalize_score_report(
+        ResumeScoreReport(
+            completeness_score=completeness_score,
+            match_score=max(0, min(100, match_score)),
+            expression_score=max(0, min(100, expression_score)),
+            strengths=[
+                "简历已覆盖教育背景、项目经历、技能与获奖等核心模块。",
+                "结构化信息可直接用于模板生成和后续岗位定制。",
+            ],
+            weaknesses=weaknesses,
+            suggestions=[
+                "优先补充项目中的个人职责、技术方法和量化成果。",
+                "将项目 bullet 改写为完整简历句，避免短语堆叠。",
+                "围绕目标岗位补充更匹配的技能关键词。",
+            ],
+            summary="已基于结构完整度和现有字段生成兜底评分。",
+        ),
+        completeness_score,
+    )
+
+
+def _score_report_to_markdown(report: ResumeScoreReport) -> str:
+    """将评分报告格式化为 Markdown。
+
+    Args:
+        report: 结构化评分报告。
+
+    Returns:
+        Markdown 评分报告。
+    """
+
+    def list_block(items: list[str]) -> str:
+        """格式化列表字段。
+
+        Args:
+            items: 文本列表。
+
+        Returns:
+            Markdown 列表文本。
+        """
+
+        return "\n".join(f"- {item}" for item in items) if items else "- 暂无"
+
+    return "\n".join(
+        [
+            "## 简历评分报告",
+            "",
+            f"- **综合评分**：{report.total_score}/100",
+            f"- **完整度**：{report.completeness_score}/100",
+            f"- **岗位匹配度**：{report.match_score}/100",
+            f"- **表达规范性**：{report.expression_score}/100",
+            "",
+            "### 优势",
+            list_block(report.strengths),
+            "",
+            "### 主要问题",
+            list_block(report.weaknesses),
+            "",
+            "### 优化建议",
+            list_block(report.suggestions),
+            "",
+            "### 总结",
+            report.summary or "暂无总结。",
+        ]
+    )
 
 
 def _basic_fallback_extract(text: str, state: ResumeState) -> dict[str, Any]:
@@ -704,6 +912,7 @@ class ResumeAgentService:
         self.turn_agent = build_langchain_agent(self.llm) if use_agent_driver else None
         self.polish_agent = _build_polish_agent(self.llm) if use_agent_driver else None
         self.import_agent = _build_import_agent(self.llm) if use_agent_driver else None
+        self.score_agent = _build_score_agent(self.llm) if use_agent_driver else None
         self.thread_id = str(uuid.uuid4())
         self.use_agent_driver = use_agent_driver
         self.recent_turns: list[dict[str, str]] = []
@@ -843,6 +1052,40 @@ class ResumeAgentService:
             agent_trace=trace,
         )
 
+    def score_resume(
+        self,
+        state: ResumeState | dict[str, Any] | str | None,
+        target_position: str = "",
+    ) -> ResumeScoreResult:
+        """对当前简历进行评分。
+
+        Args:
+            state: 当前简历状态。
+            target_position: 可选目标岗位；为空时使用状态中的目标岗位。
+
+        Returns:
+            简历评分结果。
+        """
+
+        resume_state = coerce_resume_state(state)
+        validation_report = check_missing_fields(resume_state)
+        completeness_score = _calculate_completeness_score(resume_state, validation_report)
+        target = target_position.strip() or resume_state.job_intention.target_position or "学生求职/实习"
+        trace: list[str] = ["调用工具：validate_resume_state"]
+
+        score_report = self._score_resume_with_llm(resume_state, validation_report, completeness_score, target, trace)
+        if score_report is None:
+            score_report = _fallback_score_report(resume_state, completeness_score, validation_report)
+            trace.append("fallback: score_resume")
+        else:
+            score_report = _normalize_score_report(score_report, completeness_score)
+
+        return ResumeScoreResult(
+            report=score_report,
+            markdown=_score_report_to_markdown(score_report),
+            agent_trace=trace,
+        )
+
     def _decide_with_llm(
         self,
         user_input: str,
@@ -955,6 +1198,71 @@ class ResumeAgentService:
             if parsed:
                 trace.append("LLM JSON 解析：ResumeImportResult")
                 return ResumeImportResult.model_validate(parsed)
+        except Exception:
+            return None
+        return None
+
+    def _score_resume_with_llm(
+        self,
+        state: ResumeState,
+        validation_report: dict[str, Any],
+        completeness_score: int,
+        target_position: str,
+        trace: list[str],
+    ) -> ResumeScoreReport | None:
+        """调用 LLM 生成简历评分报告。
+
+        Args:
+            state: 当前简历状态。
+            validation_report: 底线校验报告。
+            completeness_score: 代码计算的完整度分。
+            target_position: 评分使用的目标岗位。
+            trace: 执行轨迹列表。
+
+        Returns:
+            评分报告；失败时返回 None。
+        """
+
+        prompt_payload = {
+            "state_json": state.model_dump_json(ensure_ascii=False),
+            "validation_report": json.dumps(validation_report, ensure_ascii=False),
+            "completeness_score": str(completeness_score),
+            "target_position": target_position,
+        }
+
+        if self.score_agent is not None:
+            prompt = RESUME_SCORE_USER_PROMPT.format(**prompt_payload)
+            try:
+                raw_result = self.score_agent.invoke(
+                    {"messages": [{"role": "user", "content": prompt}]},
+                    config={
+                        "configurable": {"thread_id": f"{self.thread_id}:score:{uuid.uuid4()}"},
+                        "recursion_limit": 6,
+                    },
+                )
+                structured = _extract_structured_response(raw_result, ResumeScoreReport)
+                if isinstance(structured, ResumeScoreReport):
+                    trace.append("LLM 结构化评分：ResumeScoreReport")
+                    return structured
+            except Exception:
+                pass
+
+        if self.llm is None:
+            return None
+
+        prompt = ChatPromptTemplate.from_messages(
+            [
+                ("system", RESUME_SCORE_SYSTEM_PROMPT),
+                ("human", RESUME_SCORE_USER_PROMPT),
+            ]
+        )
+        try:
+            response = (prompt | self.llm).invoke(prompt_payload)
+            content = getattr(response, "content", str(response))
+            parsed = parse_json_object(str(content))
+            if parsed:
+                trace.append("LLM JSON 评分：ResumeScoreReport")
+                return ResumeScoreReport.model_validate(parsed)
         except Exception:
             return None
         return None

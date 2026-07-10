@@ -86,6 +86,35 @@ IMPORT_RESUME_USER_PROMPT = """## 已有 Markdown 简历
 
 请解析为 ResumeState，用于后续统一模板改写。"""
 
+RESUME_SCORE_SYSTEM_PROMPT = """你是学生求职简历评分专家。
+
+你的任务是基于 ResumeState、底线校验报告和目标岗位，对简历进行评分：
+1. 匹配度：评价教育背景、技能、项目、奖项、自我评价是否贴合目标岗位
+2. 表达规范性：评价经历 bullet 是否具体、正式、无重复、是否体现职责/方法/成果
+3. 优势：列出 2-4 条已经做得好的地方
+4. 问题：列出 2-4 条最影响质量的问题
+5. 建议：列出 3-5 条可执行优化建议
+
+要求：
+- 不要编造简历中没有的经历、成绩或奖项
+- 评分应严格但鼓励改进
+- 只返回结构化 ResumeScoreReport，不要输出 Markdown
+"""
+
+RESUME_SCORE_USER_PROMPT = """## ResumeState JSON
+{state_json}
+
+## 底线校验报告 JSON
+{validation_report}
+
+## 代码计算的完整度分
+{completeness_score}
+
+## 目标岗位
+{target_position}
+
+请返回结构化评分报告。"""
+
 POLISH_EXPERIENCE_PROMPT = """你需要作为一个学生求职简历润色专家，把下面经历改写为 2-3 条适合学生简历的要点。
 
 目标岗位：{target_position}
