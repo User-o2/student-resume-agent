@@ -4,10 +4,15 @@ from __future__ import annotations
 
 import json
 import re
+from io import BytesIO
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Mapping
 
+from docx import Document
+from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.oxml.ns import qn
+from docx.shared import Cm, Pt
 from jinja2 import Environment, FileSystemLoader, StrictUndefined
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.tools import tool
@@ -884,6 +889,152 @@ def fill_resume_template(
     destination.write_text(markdown, encoding="utf-8")
 
     return {"markdown": markdown, "output_path": str(destination)}
+
+
+def _set_word_run_font(run: Any, font_size: int | None = None, bold: bool | None = None) -> None:
+    """统一设置 Word 文本的中文字体和基础样式。
+
+    Args:
+        run: python-docx 的文本运行对象。
+        font_size: 可选字号，单位为磅。
+        bold: 可选加粗状态。
+
+    Returns:
+        None。
+    """
+
+    run.font.name = "Microsoft YaHei"
+    run._element.get_or_add_rPr().get_or_add_rFonts().set(qn("w:eastAsia"), "Microsoft YaHei")
+    if font_size is not None:
+        run.font.size = Pt(font_size)
+    if bold is not None:
+        run.bold = bold
+
+
+def _append_markdown_inline(paragraph: Any, text: str) -> None:
+    """将 Markdown 行内加粗语法写入 Word 段落。
+
+    Args:
+        paragraph: python-docx 的段落对象。
+        text: 待写入的 Markdown 文本。
+
+    Returns:
+        None。
+    """
+
+    for fragment in re.split(r"(\*\*[^*]+\*\*)", text.rstrip()):
+        if not fragment:
+            continue
+        is_bold = fragment.startswith("**") and fragment.endswith("**")
+        run = paragraph.add_run(fragment[2:-2] if is_bold else fragment)
+        _set_word_run_font(run, bold=is_bold)
+
+
+def _create_word_document(markdown_text: str) -> Document:
+    """将项目生成的简历 Markdown 转换为排版清晰的 Word 文档。
+
+    Args:
+        markdown_text: 已完成模板渲染的简历 Markdown 内容。
+
+    Returns:
+        可保存的 Word 文档对象。
+    """
+
+    document = Document()
+    section = document.sections[0]
+    section.top_margin = Cm(1.8)
+    section.bottom_margin = Cm(1.8)
+    section.left_margin = Cm(2.0)
+    section.right_margin = Cm(2.0)
+
+    normal_style = document.styles["Normal"]
+    normal_style.font.size = Pt(10.5)
+    normal_style.font.name = "Microsoft YaHei"
+    normal_style.element.get_or_add_rPr().get_or_add_rFonts().set(qn("w:eastAsia"), "Microsoft YaHei")
+
+    for raw_line in markdown_text.splitlines():
+        line = raw_line.rstrip()
+        if not line:
+            continue
+
+        if line.startswith("# "):
+            paragraph = document.add_paragraph()
+            paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            paragraph.paragraph_format.space_after = Pt(10)
+            run = paragraph.add_run(line[2:].strip())
+            _set_word_run_font(run, font_size=18, bold=True)
+            continue
+
+        if line.startswith("## "):
+            paragraph = document.add_paragraph()
+            paragraph.paragraph_format.space_before = Pt(8)
+            paragraph.paragraph_format.space_after = Pt(4)
+            run = paragraph.add_run(line[3:].strip())
+            _set_word_run_font(run, font_size=13, bold=True)
+            continue
+
+        if line.startswith("### "):
+            paragraph = document.add_paragraph()
+            paragraph.paragraph_format.space_before = Pt(6)
+            paragraph.paragraph_format.space_after = Pt(3)
+            run = paragraph.add_run(line[4:].strip())
+            _set_word_run_font(run, font_size=11, bold=True)
+            continue
+
+        if line.startswith("- "):
+            paragraph = document.add_paragraph(style="List Bullet")
+            paragraph.paragraph_format.space_after = Pt(1)
+            _append_markdown_inline(paragraph, line[2:].strip())
+            continue
+
+        title_match = re.fullmatch(r"\*\*(.+?)\*\*", line.strip())
+        if title_match:
+            paragraph = document.add_paragraph()
+            paragraph.paragraph_format.space_before = Pt(4)
+            paragraph.paragraph_format.space_after = Pt(1)
+            run = paragraph.add_run(title_match.group(1))
+            _set_word_run_font(run, font_size=11, bold=True)
+            continue
+
+        paragraph = document.add_paragraph()
+        paragraph.paragraph_format.space_after = Pt(2)
+        _append_markdown_inline(paragraph, line.strip())
+
+    return document
+
+
+def export_resume_to_word(
+    markdown_text: str,
+    output_path: Path | str | None = None,
+) -> dict[str, str | bytes]:
+    """将已生成的简历 Markdown 导出为 Word 文档。
+
+    Args:
+        markdown_text: 已生成的 Markdown 简历内容。
+        output_path: 可选的 .docx 输出路径。
+
+    Returns:
+        包含 Word 二进制内容和输出路径的字典。
+
+    Raises:
+        ValueError: Markdown 内容为空或输出路径不是 .docx 文件时抛出。
+    """
+
+    if not markdown_text.strip():
+        raise ValueError("Markdown 简历为空，无法导出 Word 文件。")
+
+    destination = Path(output_path) if output_path else OUTPUTS_DIR / f"resume_{datetime.now():%Y%m%d_%H%M%S}.docx"
+    if destination.suffix.lower() != ".docx":
+        raise ValueError("Word 输出路径必须以 .docx 结尾。")
+
+    document = _create_word_document(markdown_text)
+    buffer = BytesIO()
+    document.save(buffer)
+    document_bytes = buffer.getvalue()
+
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_bytes(document_bytes)
+    return {"docx_bytes": document_bytes, "output_path": str(destination)}
 
 
 @tool

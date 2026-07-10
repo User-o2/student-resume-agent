@@ -6,10 +6,13 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from docx import Document
+
 from app.schema import ResumeState
 from app.tools import (
     check_missing_fields,
     collect_resume_info,
+    export_resume_to_word,
     fill_resume_template,
     polish_experience,
 )
@@ -278,6 +281,44 @@ class ResumeToolTestCase(unittest.TestCase):
         self.assertIn("校园平台", result["markdown"])
         self.assertIn("## 竞赛获奖", result["markdown"])
         self.assertTrue(Path(result["output_path"]).name.endswith("resume.md"))
+
+    def test_export_resume_to_word_writes_readable_docx(self) -> None:
+        """验证已生成的 Markdown 简历可以导出为可读取的 Word 文件。"""
+
+        markdown = """# 李明
+
+- **求职意向**：Python 后端实习 | 互联网 | 杭州
+- **电话**：13800000001
+
+## 教育背景
+浙江工业大学 计算机学院 计算机科学与技术专业
+- **核心课程**：数据结构，计算机网络
+
+## 项目经历
+**校园平台**
+- 负责后端接口开发，完成用户认证与商品管理模块。
+"""
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            output_path = Path(tmp_dir) / "resume.docx"
+            result = export_resume_to_word(markdown, output_path=output_path)
+
+            self.assertTrue(output_path.exists())
+            self.assertGreater(len(result["docx_bytes"]), 0)
+            document = Document(output_path)
+            content = "\n".join(paragraph.text for paragraph in document.paragraphs)
+
+        self.assertEqual(result["output_path"], str(output_path))
+        self.assertIn("李明", content)
+        self.assertIn("教育背景", content)
+        self.assertIn("校园平台", content)
+        self.assertIn("负责后端接口开发", content)
+
+    def test_export_resume_to_word_rejects_empty_markdown(self) -> None:
+        """验证空简历不会被导出为 Word 文件。"""
+
+        with self.assertRaises(ValueError):
+            export_resume_to_word("   ")
 
     def test_polish_experience_fallback_returns_bullets(self) -> None:
         """验证无 LLM 时经历润色仍能返回简历要点。"""

@@ -6,3 +6,4 @@ pydantic>=2.13
 python-dotenv>=1.2
 Jinja2>=3.1
 httpx>=0.28
+python-docx>=1.2,<2

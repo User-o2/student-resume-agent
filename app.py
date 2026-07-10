@@ -11,7 +11,7 @@ import streamlit as st
 from app.agent import ResumeAgentService
 from app.config import OUTPUTS_DIR
 from app.schema import ResumeState
-from app.tools import STAGE_LABELS, check_missing_fields
+from app.tools import STAGE_LABELS, check_missing_fields, export_resume_to_word
 
 
 CONVERSATION_DIR = OUTPUTS_DIR / "conversations"
@@ -52,6 +52,10 @@ def init_session_state() -> None:
         ]
     if "resume_markdown" not in st.session_state:
         st.session_state.resume_markdown = ""
+    if "word_document" not in st.session_state:
+        st.session_state.word_document = b""
+    if "word_output_path" not in st.session_state:
+        st.session_state.word_output_path = ""
     if "score_markdown" not in st.session_state:
         st.session_state.score_markdown = ""
     if "output_path" not in st.session_state:
@@ -87,6 +91,7 @@ def save_conversation_log(event: str = "turn_complete") -> None:
         "agent_trace_history": st.session_state.agent_trace_history,
         "output_path": st.session_state.output_path,
         "has_resume_markdown": bool(st.session_state.resume_markdown),
+        "word_output_path": st.session_state.word_output_path,
         "score_markdown": st.session_state.score_markdown,
     }
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -124,6 +129,8 @@ def reset_session() -> None:
         }
     ]
     st.session_state.resume_markdown = ""
+    st.session_state.word_document = b""
+    st.session_state.word_output_path = ""
     st.session_state.score_markdown = ""
     st.session_state.output_path = ""
     st.session_state.agent_trace = []
@@ -228,6 +235,8 @@ def process_pending_message(use_llm: bool) -> None:
     if result.resume_markdown:
         st.session_state.resume_markdown = result.resume_markdown
         st.session_state.output_path = result.output_path
+        st.session_state.word_document = b""
+        st.session_state.word_output_path = ""
     st.session_state.agent_trace = result.agent_trace
     st.session_state.agent_trace_history.append(
         {
@@ -277,6 +286,8 @@ def render_existing_resume_upload(use_llm: bool) -> None:
         st.session_state.resume_state = result.state
         st.session_state.resume_markdown = result.markdown
         st.session_state.output_path = result.output_path
+        st.session_state.word_document = b""
+        st.session_state.word_output_path = ""
         st.session_state.agent_trace = result.agent_trace
         st.session_state.agent_trace_history.append(
             {
@@ -337,7 +348,7 @@ def render_resume_score_panel(use_llm: bool) -> None:
 
 
 def render_resume_result() -> None:
-    """渲染生成后的 Markdown 下载区域。
+    """渲染生成后的 Markdown 与 Word 导出区域。
 
     Args:
         无。
@@ -350,15 +361,49 @@ def render_resume_result() -> None:
         return
 
     st.divider()
-    st.subheader("Markdown 文件")
+    st.subheader("导出简历")
     st.caption(st.session_state.output_path)
-    st.download_button(
-        label="下载 Markdown",
-        data=st.session_state.resume_markdown,
-        file_name="student_resume.md",
-        mime="text/markdown",
-        use_container_width=True,
-    )
+    markdown_column, word_column = st.columns(2)
+    with markdown_column:
+        st.download_button(
+            label="下载 Markdown",
+            data=st.session_state.resume_markdown,
+            file_name="student_resume.md",
+            mime="text/markdown",
+            use_container_width=True,
+        )
+
+    with word_column:
+        if not st.session_state.word_document:
+            if st.button("导出为 Word", use_container_width=True):
+                source_path = Path(st.session_state.output_path)
+                word_path = source_path.with_suffix(".docx") if source_path.suffix else OUTPUTS_DIR / "student_resume.docx"
+                try:
+                    result = export_resume_to_word(st.session_state.resume_markdown, output_path=word_path)
+                except (OSError, ValueError) as error:
+                    st.error(f"Word 导出失败：{error}")
+                else:
+                    st.session_state.word_document = result["docx_bytes"]
+                    st.session_state.word_output_path = result["output_path"]
+                    st.session_state.agent_trace = ["调用工具：export_resume_to_word"]
+                    st.session_state.agent_trace_history.append(
+                        {
+                            "turn": len([message for message in st.session_state.messages if message["role"] == "user"]) + 1,
+                            "user_input": "导出为 Word",
+                            "trace": st.session_state.agent_trace,
+                        }
+                    )
+                    save_conversation_log("export_word")
+                    st.rerun()
+        else:
+            st.download_button(
+                label="下载 Word",
+                data=st.session_state.word_document,
+                file_name=Path(st.session_state.word_output_path).name or "student_resume.docx",
+                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                use_container_width=True,
+            )
+            st.caption(st.session_state.word_output_path)
 
 
 def main() -> None:
