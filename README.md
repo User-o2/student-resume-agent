@@ -1,6 +1,6 @@
 # 学生简历生成智能体
 
-一个基于 Python、LangChain 和 Streamlit 的学生求职简历应用。它通过多轮对话或上传已有 Markdown 简历收集信息，以 LLM 的理解和润色为主、规则代码校验为辅，生成可直接下载的 Markdown 与 Word 简历。
+一个基于 Python、LangChain 和 Streamlit 的学生求职简历应用。它通过多轮对话收集信息，以 LLM 的理解和润色为主、规则代码校验为辅，生成可直接下载的 Markdown 与 Word 简历。
 
 使用的模型型号为 `qwen3.6-35b-a3b`，运行时关闭 thinking 模式。
 
@@ -19,13 +19,12 @@
 ### 模板与导出
 
 - 使用 `data/resume_template.md` 作为 Jinja2 模板，生成包含个人信息、教育背景、项目经历、实习经历、竞赛获奖和自我评价的 Markdown 简历。
-- 实习经历支持展示单位、角色、起止时间和经历要点；没有正式实习时可展示用户提供的说明。
 - 生成结果自动写入 `outputs/`，页面中可直接下载 Markdown。
 - 已生成 Markdown 后可导出 `.docx` 文件，并下载 Word 简历。
 
 ### 上传已有简历并优化
 
-- 支持上传 UTF-8 编码的 Markdown 或文本简历。
+- 支持上传 UTF-8 编码的 Markdown 简历。
 - LLM 将已有简历解析为 `ResumeState`，保留原有事实，再执行去重、项目要点润色和统一模板改写。
 - 优化后的 Markdown 简历会写入 `outputs/`，并可继续导出 Word。
 
@@ -61,7 +60,6 @@ LLM 最终润色或结构化评分
 ### 状态与消息记忆
 
 - `ResumeState` 是简历事实的唯一来源。
-- 历史版本中的 `basic_info.university`、`basic_info.major` 会在读取或合并时自动迁移，旧案例和旧会话仍可兼容。
 - LangChain 消息记忆只服务于自然语言对话连续性。导入、最终润色和评分都是一次性任务，不复用主对话消息。
 
 ### Agent 与 Tool
@@ -91,7 +89,7 @@ LLM 最终润色或结构化评分
 │   ├── resume_to_optimize/        # 待优化或评分的 Markdown 简历示例
 │   ├── resume_case/               # 简历案例
 │   └── examples/                  # 结构化学生案例数据
-├── outputs/
+├── outputs/                        # 运行时自动创建，不纳入 Git
 │   ├── conversations/             # 对话与执行记录
 │   └── *.md / *.docx              # 生成、优化和导出的简历
 ├── scripts/
@@ -105,6 +103,8 @@ LLM 最终润色或结构化评分
 │   ├── test_characterization.py   # 核心外部行为特征测试
 │   ├── test_core.py               # 状态、模板与 Word 导出测试
 │   └── test_config.py             # 配置加载测试
+├── .env.example                   # 不含密钥的环境变量示例
+├── pyproject.toml                 # 项目元数据与 Ruff 工程配置
 ├── requirements.txt
 └── README.md
 ```
@@ -127,7 +127,13 @@ python -m pip install -r requirements.txt
 
 ### 配置模型接口
 
-在项目根目录创建 `.env`。推荐使用 OpenAI 兼容接口配置：
+复制环境变量示例并填写真实接口信息：
+
+```bash
+cp .env.example .env
+```
+
+`.env` 使用 OpenAI 兼容接口配置：
 
 ```dotenv
 office_base_url=BASE_URL
@@ -197,12 +203,4 @@ python scripts/optimize_existing_resume.py \
 source ~/miniconda3/bin/activate
 conda activate langchain
 python -m unittest discover -s tests
-```
-
-如需进行联网验收，可额外运行：
-
-```bash
-python scripts/check_llm_connection.py
-python scripts/check_agent_driver.py
-python scripts/check_agent_driver.py --full
 ```
