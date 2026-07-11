@@ -182,8 +182,43 @@ class ResumeToolTestCase(unittest.TestCase):
             },
         )
 
-        self.assertEqual(state.basic_info.major, "人工智能")
         self.assertEqual(state.education.major, "人工智能")
+        self.assertNotIn("major", state.basic_info.model_dump())
+
+    def test_legacy_basic_education_fields_migrate_and_can_correct_state(self) -> None:
+        """验证旧版学校、专业字段可读取，并能作为补丁修正规范字段。"""
+
+        state = ResumeState.model_validate(
+            {
+                "basic_info": {
+                    "name": "李明",
+                    "university": "旧学校",
+                    "major": "旧专业",
+                },
+                "education": {
+                    "school": "规范学校",
+                    "major": "规范专业",
+                },
+            }
+        )
+
+        self.assertEqual(state.education.school, "规范学校")
+        self.assertEqual(state.education.major, "规范专业")
+        self.assertNotIn("university", state.basic_info.model_dump())
+        self.assertNotIn("major", state.basic_info.model_dump())
+
+        corrected = collect_resume_info(
+            state,
+            {
+                "basic_info": {
+                    "university": "浙江工业大学",
+                    "major": "计算机科学与技术专业",
+                }
+            },
+        )
+
+        self.assertEqual(corrected.education.school, "浙江工业大学")
+        self.assertEqual(corrected.education.major, "计算机科学与技术")
 
     def test_check_missing_fields_uses_best_meaningful_project(self) -> None:
         """验证空项目不会导致完整项目被误判为缺技术。"""

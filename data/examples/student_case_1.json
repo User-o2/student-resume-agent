@@ -1,8 +1,6 @@
 {
   "basic_info": {
     "name": "李明",
-    "university": "浙江工业大学",
-    "major": "计算机科学与技术",
     "grade": "大三",
     "phone": "13800000001",
     "email": "liming@example.com",

@@ -213,7 +213,7 @@ class ResumeAgentFlowTestCase(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp_dir:
             with (
-                patch("app.tools.OUTPUTS_DIR", Path(tmp_dir)),
+                patch("app.resume.OUTPUTS_DIR", Path(tmp_dir)),
                 patch.object(
                     BaseTool,
                     "invoke",
@@ -251,7 +251,7 @@ class ResumeAgentFlowTestCase(unittest.TestCase):
         self.assertIsNotNone(result)
         self.assertEqual(state.current_stage, "ready")
         self.assertTrue(state.projects)
-        self.assertEqual(state.basic_info.major, "计算机科学与技术")
+        self.assertEqual(state.education.major, "计算机科学与技术")
 
         with patch(
             "app.agent._fill_template_with_tool",

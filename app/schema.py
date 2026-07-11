@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 def now_text() -> str:
@@ -21,12 +22,41 @@ def now_text() -> str:
     return datetime.now().isoformat(timespec="seconds")
 
 
+def migrate_legacy_resume_data(data: Any, prefer_legacy: bool = False) -> Any:
+    """将旧版基本信息中的学校、专业迁移到教育背景。
+
+    Args:
+        data: 待迁移的 ResumeState 字典或其他输入。
+        prefer_legacy: 旧字段是否代表本轮修正并覆盖已有教育字段。
+
+    Returns:
+        不含重复学校、专业字段的新数据；非字典输入原样返回。
+    """
+
+    if not isinstance(data, Mapping):
+        return data
+
+    payload = dict(data)
+    basic_info = dict(payload.get("basic_info") or {})
+    education = dict(payload.get("education") or {})
+    legacy_school = basic_info.pop("university", "")
+    legacy_major = basic_info.pop("major", "")
+
+    if legacy_school and (prefer_legacy or not education.get("school")):
+        education["school"] = legacy_school
+    if legacy_major and (prefer_legacy or not education.get("major")):
+        education["major"] = legacy_major
+
+    payload["basic_info"] = basic_info
+    if education or "education" in payload:
+        payload["education"] = education
+    return payload
+
+
 class BasicInfo(BaseModel):
     """学生基本信息。"""
 
     name: str = ""
-    university: str = ""
-    major: str = ""
     grade: str = ""
     phone: str = ""
     email: str = ""
@@ -102,6 +132,20 @@ class ResumeState(BaseModel):
     created_at: str = Field(default_factory=now_text)
     updated_at: str = Field(default_factory=now_text)
 
+    @model_validator(mode="before")
+    @classmethod
+    def migrate_legacy_fields(cls, data: Any) -> Any:
+        """兼容读取仍含 basic_info.university/major 的历史状态。
+
+        Args:
+            data: Pydantic 校验前的原始状态。
+
+        Returns:
+            学校、专业已迁移到 education 的状态数据。
+        """
+
+        return migrate_legacy_resume_data(data)
+
     def touch(self) -> None:
         """刷新状态更新时间。
 
@@ -113,32 +157,3 @@ class ResumeState(BaseModel):
         """
 
         self.updated_at = now_text()
-
-    def target_summary(self) -> str:
-        """生成求职意向摘要。
-
-        Args:
-            无。
-
-        Returns:
-            求职方向摘要文本。
-        """
-
-        parts = [
-            self.job_intention.target_position,
-            self.job_intention.target_industry,
-            self.job_intention.expected_city,
-        ]
-        return " / ".join(part for part in parts if part) or "待补充"
-
-    def to_public_dict(self) -> dict[str, Any]:
-        """导出适合 UI 展示和工具传递的字典。
-
-        Args:
-            无。
-
-        Returns:
-            简历状态字典。
-        """
-
-        return self.model_dump()

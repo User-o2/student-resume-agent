@@ -5,20 +5,29 @@ from __future__ import annotations
 import json
 import re
 import uuid
-from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any
 
-import httpx
-from langchain.agents import create_agent
-from langchain.agents.structured_output import ToolStrategy
-from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.prompts import ChatPromptTemplate
-from langchain_openai import ChatOpenAI
-from langgraph.checkpoint.memory import InMemorySaver
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
+from app.agent_models import (
+    AgentTurnResult,
+    ExistingResumeOptimizationResult,
+    ResumeImportResult,
+    ResumePolishResult,
+    ResumeScoreReport,
+    ResumeScoreResult,
+    ResumeTurnDecision,
+)
 from app.config import AppConfig, load_config
+from app.llm import (
+    build_chat_model,
+    build_import_agent,
+    build_langchain_agent,
+    build_polish_agent,
+    build_score_agent,
+)
 from app.prompts import (
     FINAL_POLISH_SYSTEM_PROMPT,
     FINAL_POLISH_USER_PROMPT,
@@ -29,10 +38,14 @@ from app.prompts import (
     TURN_DECISION_SYSTEM_PROMPT,
     TURN_DECISION_USER_PROMPT,
 )
+from app.resume_parser import parse_existing_resume as _parse_existing_resume_fallback
+from app.resume_parser import split_items as _split_items
+from app.resume_scoring import build_fallback_score_report as _fallback_score_report
+from app.resume_scoring import calculate_completeness_score as _calculate_completeness_score
+from app.resume_scoring import normalize_score_report as _normalize_score_report
+from app.resume_scoring import score_report_to_markdown as _score_report_to_markdown
 from app.schema import ResumeState
 from app.tools import (
-    check_missing_fields,
-    collect_resume_info,
     collect_resume_info_tool,
     coerce_resume_state,
     fill_resume_template_tool,
@@ -44,238 +57,6 @@ from app.tools import (
 
 GENERATE_KEYWORDS = ("生成简历", "输出简历", "导出简历", "完成简历")
 GREETING_KEYWORDS = {"你好", "您好", "hi", "hello", "嗨", "在吗", "开始"}
-
-
-class ResumeTurnDecision(BaseModel):
-    """LLM 对单轮用户输入的结构化决策。"""
-
-    intent: Literal["collect_info", "generate_resume", "greeting", "chat"] = Field(
-        default="collect_info",
-        description="本轮用户意图。",
-    )
-    patch: dict[str, Any] = Field(
-        default_factory=dict,
-        description="从用户输入中抽取出的 ResumeState 增量补丁，只包含用户明确提供的信息。",
-    )
-    assistant_message: str = Field(
-        default="",
-        description="本轮要回复给用户的自然语言消息。",
-    )
-    followup_questions: list[str] = Field(
-        default_factory=list,
-        description="下一步建议追问的问题，每轮最多 3 个。",
-    )
-    ready_to_generate_reason: str = Field(
-        default="",
-        description="如果认为信息完整或用户请求生成，说明理由；不完整时留空。",
-    )
-    confidence: float = Field(
-        default=0.0,
-        ge=0.0,
-        le=1.0,
-        description="LLM 对本轮抽取和回复规划的置信度。",
-    )
-
-
-class ResumePolishResult(BaseModel):
-    """LLM 对生成前简历状态的结构化清洗结果。"""
-
-    state: ResumeState = Field(description="去重、润色后的简历状态。")
-    summary: str = Field(default="", description="本次清洗的简短说明。")
-
-
-class ResumeImportResult(BaseModel):
-    """LLM 对已有 Markdown 简历的结构化解析结果。"""
-
-    state: ResumeState = Field(description="从已有简历解析出的简历状态。")
-    summary: str = Field(default="", description="已有简历内容概述。")
-    optimization_notes: list[str] = Field(default_factory=list, description="解析阶段发现的可优化问题。")
-
-
-class ResumeScoreReport(BaseModel):
-    """简历评分结构化报告。"""
-
-    completeness_score: int = Field(default=0, ge=0, le=100, description="完整度评分。")
-    match_score: int = Field(default=0, ge=0, le=100, description="岗位匹配度评分。")
-    expression_score: int = Field(default=0, ge=0, le=100, description="表达规范性评分。")
-    total_score: int = Field(default=0, ge=0, le=100, description="综合评分。")
-    strengths: list[str] = Field(default_factory=list, description="简历优势。")
-    weaknesses: list[str] = Field(default_factory=list, description="主要问题。")
-    suggestions: list[str] = Field(default_factory=list, description="优化建议。")
-    summary: str = Field(default="", description="评分总结。")
-
-
-@dataclass
-class AgentTurnResult:
-    """单轮对话处理结果。
-
-    Args:
-        assistant_message: 返回给用户的消息。
-        state: 更新后的简历状态。
-        missing_report: 缺失字段与质量检查报告。
-        resume_markdown: 生成的 Markdown 简历内容。
-        output_path: 生成文件路径。
-        agent_trace: 本轮关键步骤轨迹。
-    """
-
-    assistant_message: str
-    state: ResumeState
-    missing_report: dict[str, Any]
-    resume_markdown: str = ""
-    output_path: str = ""
-    agent_trace: list[str] = field(default_factory=list)
-
-
-@dataclass
-class ExistingResumeOptimizationResult:
-    """已有简历解析与优化结果。
-
-    Args:
-        state: 优化后的结构化简历状态。
-        markdown: 优化后的 Markdown 简历。
-        output_path: 输出文件路径。
-        summary: 解析与优化摘要。
-        missing_report: 底线校验报告。
-        agent_trace: 执行轨迹。
-    """
-
-    state: ResumeState
-    markdown: str
-    output_path: str
-    summary: str
-    missing_report: dict[str, Any]
-    agent_trace: list[str] = field(default_factory=list)
-
-
-@dataclass
-class ResumeScoreResult:
-    """简历评分结果。
-
-    Args:
-        report: 结构化评分报告。
-        markdown: Markdown 格式评分报告。
-        agent_trace: 执行轨迹。
-    """
-
-    report: ResumeScoreReport
-    markdown: str
-    agent_trace: list[str] = field(default_factory=list)
-
-
-def build_chat_model(config: AppConfig | None = None) -> BaseChatModel | None:
-    """构建 OpenAI 兼容的 LangChain 聊天模型。
-
-    Args:
-        config: 应用配置；为空时自动从 `.env` 加载。
-
-    Returns:
-        聊天模型实例；缺少 API Key 时返回 None。
-    """
-
-    app_config = config or load_config()
-    if not app_config.api_key:
-        return None
-
-    http_client = httpx.Client(
-        verify=app_config.ssl_verify,
-        timeout=30,
-        trust_env=True,
-    )
-
-    return ChatOpenAI(
-        model=app_config.model,
-        api_key=app_config.api_key,
-        base_url=app_config.base_url,
-        temperature=app_config.temperature,
-        timeout=30,
-        max_retries=2,
-        extra_body={"enable_thinking": app_config.enable_thinking},
-        http_client=http_client,
-        http_socket_options=(),
-    )
-
-
-def build_langchain_agent(llm: BaseChatModel | None = None) -> Any | None:
-    """构建结构化单轮决策 Agent。
-
-    Args:
-        llm: 聊天模型实例。
-
-    Returns:
-        使用 `ResumeTurnDecision` 作为结构化输出的 Agent；模型不可用时返回 None。
-    """
-
-    if llm is None:
-        return None
-    # Checkpointer 只保存对话语境；姓名、经历等业务事实始终以每轮传入的
-    # ResumeState 为准，避免再维护一份手工对话摘要作为事实来源。
-    return create_agent(
-        model=llm,
-        tools=[],
-        system_prompt=TURN_DECISION_SYSTEM_PROMPT,
-        response_format=ToolStrategy(ResumeTurnDecision),
-        checkpointer=InMemorySaver(),
-    )
-
-
-def _build_polish_agent(llm: BaseChatModel | None = None) -> Any | None:
-    """构建生成前简历清洗 Agent。
-
-    Args:
-        llm: 聊天模型实例。
-
-    Returns:
-        使用 `ResumePolishResult` 作为结构化输出的 Agent；模型不可用时返回 None。
-    """
-
-    if llm is None:
-        return None
-    return create_agent(
-        model=llm,
-        tools=[],
-        system_prompt=FINAL_POLISH_SYSTEM_PROMPT,
-        response_format=ToolStrategy(ResumePolishResult),
-    )
-
-
-def _build_import_agent(llm: BaseChatModel | None = None) -> Any | None:
-    """构建已有简历解析 Agent。
-
-    Args:
-        llm: 聊天模型实例。
-
-    Returns:
-        使用 `ResumeImportResult` 作为结构化输出的 Agent；模型不可用时返回 None。
-    """
-
-    if llm is None:
-        return None
-    return create_agent(
-        model=llm,
-        tools=[],
-        system_prompt=IMPORT_RESUME_SYSTEM_PROMPT,
-        response_format=ToolStrategy(ResumeImportResult),
-    )
-
-
-def _build_score_agent(llm: BaseChatModel | None = None) -> Any | None:
-    """构建简历评分 Agent。
-
-    Args:
-        llm: 聊天模型实例。
-
-    Returns:
-        使用 `ResumeScoreReport` 作为结构化输出的 Agent；模型不可用时返回 None。
-    """
-
-    if llm is None:
-        return None
-    return create_agent(
-        model=llm,
-        tools=[],
-        system_prompt=RESUME_SCORE_SYSTEM_PROMPT,
-        response_format=ToolStrategy(ResumeScoreReport),
-    )
 
 
 def _contains_generate_intent(text: str) -> bool:
@@ -332,358 +113,6 @@ def _compact_patch(value: Any, key: str = "") -> Any:
     return value if value not in (None, "", [], {}) else None
 
 
-def _split_items(text: str) -> list[str]:
-    """按常见中英文分隔符拆分条目。
-
-    Args:
-        text: 原始文本。
-
-    Returns:
-        清洗后的条目列表。
-    """
-
-    parts = re.split(r"[、,，;；/|\n]+", text)
-    return [part.strip(" ：:。.") for part in parts if part.strip(" ：:。.")]
-
-
-def _strip_markdown_label(line: str, label: str) -> str:
-    """从 Markdown 列表行中去掉加粗标签。
-
-    Args:
-        line: Markdown 行文本。
-        label: 标签名称。
-
-    Returns:
-        标签后的字段内容。
-    """
-
-    pattern = rf"^\s*-\s*\*\*{re.escape(label)}\*\*[:：]\s*(.+?)\s*$"
-    match = re.search(pattern, line)
-    return match.group(1).strip() if match else ""
-
-
-def _extract_markdown_section(markdown_text: str, heading: str) -> str:
-    """提取指定二级标题下的 Markdown 内容。
-
-    Args:
-        markdown_text: 完整 Markdown 文本。
-        heading: 二级标题名称。
-
-    Returns:
-        标题下方内容；不存在时返回空字符串。
-    """
-
-    pattern = rf"^##\s+{re.escape(heading)}\s*$([\s\S]*?)(?=^##\s+|\Z)"
-    match = re.search(pattern, markdown_text, flags=re.MULTILINE)
-    return match.group(1).strip() if match else ""
-
-
-def _parse_titled_markdown_blocks(section_text: str) -> list[tuple[str, list[str]]]:
-    """解析由加粗标题和 bullet 组成的 Markdown 块。
-
-    Args:
-        section_text: Markdown 小节文本。
-
-    Returns:
-        标题与 bullet 列表。
-    """
-
-    blocks: list[tuple[str, list[str]]] = []
-    current_title = ""
-    current_items: list[str] = []
-    for raw_line in section_text.splitlines():
-        line = raw_line.strip()
-        title_match = re.fullmatch(r"\*\*(.+?)\*\*", line)
-        if title_match:
-            if current_title:
-                blocks.append((current_title, current_items))
-            current_title = title_match.group(1).strip()
-            current_items = []
-            continue
-        if line.startswith("-"):
-            current_items.append(line.lstrip("-").strip())
-    if current_title:
-        blocks.append((current_title, current_items))
-    return blocks
-
-
-def _parse_experience_section(markdown_text: str, heading: str) -> list[dict[str, Any]]:
-    """将项目或实习 Markdown 小节解析为经历补丁。
-
-    Args:
-        markdown_text: 完整 Markdown 简历。
-        heading: 待解析的二级标题。
-
-    Returns:
-        可写入 ResumeState 的经历字典列表。
-    """
-
-    blocks = _parse_titled_markdown_blocks(_extract_markdown_section(markdown_text, heading))
-    return [
-        {
-            "title": title,
-            "raw_description": "；".join(items),
-            "responsibilities": items,
-            "results": [
-                item
-                for item in items
-                if re.search(r"\d|%|提升|准确率|响应|完成|排名|F1", item, flags=re.IGNORECASE)
-            ],
-        }
-        for title, items in blocks
-    ]
-
-
-def _parse_existing_resume_fallback(markdown_text: str) -> ResumeState:
-    """使用轻量规则解析标准 Markdown 简历。
-
-    Args:
-        markdown_text: 已有 Markdown 简历。
-
-    Returns:
-        解析出的简历状态。
-    """
-
-    state = ResumeState()
-    update: dict[str, Any] = {}
-    lines = [line.rstrip() for line in markdown_text.splitlines()]
-    title_match = re.search(r"^#\s+(.+?)\s*$", markdown_text, flags=re.MULTILINE)
-    if title_match:
-        update.setdefault("basic_info", {})["name"] = title_match.group(1).strip()
-
-    for line in lines:
-        job_text = _strip_markdown_label(line, "求职意向")
-        if job_text:
-            parts = [part.strip() for part in job_text.split("|")]
-            update["job_intention"] = {
-                "target_position": parts[0] if len(parts) > 0 else "",
-                "target_industry": parts[1] if len(parts) > 1 else "",
-                "expected_city": parts[2] if len(parts) > 2 else "",
-            }
-        for label, field_name in {"电话": "phone", "邮箱": "email", "籍贯": "native_place"}.items():
-            value = _strip_markdown_label(line, label)
-            if value:
-                update.setdefault("basic_info", {})[field_name] = value
-
-    education_text = _extract_markdown_section(markdown_text, "教育背景")
-    education_update: dict[str, Any] = {}
-    if education_text:
-        education_lines = [line.strip() for line in education_text.splitlines() if line.strip()]
-        header = next((line for line in education_lines if not line.startswith("-")), "")
-        header_match = re.match(r"(.+?)\s+(.+?)\s+(.+?)专业", header)
-        if header_match:
-            school, college, major = [item.strip() for item in header_match.groups()]
-            education_update.update({"school": school, "college": college, "major": major})
-            update.setdefault("basic_info", {}).update({"university": school, "major": major})
-        for line in education_lines:
-            for label, field_name in {
-                "专业排名": "gpa_or_rank",
-                "英语水平": "english_level",
-            }.items():
-                value = _strip_markdown_label(line, label)
-                if value:
-                    education_update[field_name] = value
-            courses = _strip_markdown_label(line, "核心课程")
-            if courses:
-                education_update["courses"] = _split_items(courses)
-            tech_stack = _strip_markdown_label(line, "技术栈")
-            if tech_stack:
-                skill_items = _split_items(tech_stack)
-                languages = {"Python", "Java", "C++", "JavaScript", "TypeScript", "Go"}
-                update["skills"] = {
-                    "programming_languages": [item for item in skill_items if item in languages],
-                    "tools": [item for item in skill_items if item not in languages],
-                }
-    if education_update:
-        update["education"] = education_update
-
-    projects = _parse_experience_section(markdown_text, "项目经历")
-    if projects:
-        update["projects"] = projects
-
-    internships = _parse_experience_section(markdown_text, "实习经历")
-    if internships:
-        update["internships"] = internships
-
-    award_blocks = _parse_titled_markdown_blocks(_extract_markdown_section(markdown_text, "竞赛获奖"))
-    if award_blocks:
-        update["awards"] = [
-            {
-                "name": title,
-                "description": "；".join(items),
-                "highlights": items,
-            }
-            for title, items in award_blocks
-        ]
-
-    self_text = _extract_markdown_section(markdown_text, "自我评价")
-    if self_text:
-        update["self_evaluation"] = "；".join(
-            line.lstrip("-").strip()
-            for line in self_text.splitlines()
-            if line.strip().lstrip("-").strip()
-        )
-
-    return collect_resume_info(state, update)
-
-
-def _calculate_completeness_score(state: ResumeState, report: dict[str, Any]) -> int:
-    """计算简历完整度评分。
-
-    Args:
-        state: 当前简历状态。
-        report: 底线校验报告。
-
-    Returns:
-        0-100 的完整度分数。
-    """
-
-    checks = [
-        bool(state.basic_info.name),
-        bool(state.basic_info.phone),
-        bool(state.basic_info.email),
-        bool(state.basic_info.native_place),
-        bool(state.job_intention.target_position),
-        bool(state.job_intention.target_industry),
-        bool(state.job_intention.expected_city),
-        bool(state.education.school or state.basic_info.university),
-        bool(state.education.college),
-        bool(state.education.major or state.basic_info.major),
-        bool(state.education.courses),
-        bool(state.education.gpa_or_rank),
-        bool(state.education.english_level),
-        bool(state.skills.programming_languages or state.skills.tools or state.skills.professional_skills),
-        bool(state.projects),
-        any(project.technologies for project in state.projects),
-        any(project.responsibilities or project.polished_bullets for project in state.projects),
-        any(project.results or project.polished_bullets for project in state.projects),
-        bool(state.awards),
-        bool(state.self_evaluation),
-    ]
-    base_score = round(sum(checks) / len(checks) * 100)
-    penalty = min(len(report.get("validation_errors", [])) * 8, 20)
-    return max(0, min(100, base_score - penalty))
-
-
-def _normalize_score_report(report: ResumeScoreReport, completeness_score: int) -> ResumeScoreReport:
-    """规整评分报告并重算综合分。
-
-    Args:
-        report: 原始评分报告。
-        completeness_score: 代码计算的完整度分。
-
-    Returns:
-        规整后的评分报告。
-    """
-
-    normalized = report.model_copy(deep=True)
-    normalized.completeness_score = completeness_score
-    normalized.match_score = max(0, min(100, normalized.match_score))
-    normalized.expression_score = max(0, min(100, normalized.expression_score))
-    normalized.total_score = round(
-        normalized.completeness_score * 0.35
-        + normalized.match_score * 0.35
-        + normalized.expression_score * 0.30
-    )
-    return normalized
-
-
-def _fallback_score_report(state: ResumeState, completeness_score: int, report: dict[str, Any]) -> ResumeScoreReport:
-    """生成无 LLM 时的兜底评分报告。
-
-    Args:
-        state: 当前简历状态。
-        completeness_score: 代码计算的完整度分。
-        report: 底线校验报告。
-
-    Returns:
-        兜底评分报告。
-    """
-
-    match_score = 70
-    if state.job_intention.target_position and state.projects:
-        match_score += 10
-    if state.skills.programming_languages or state.skills.tools or state.skills.professional_skills:
-        match_score += 8
-    if state.awards:
-        match_score += 5
-    expression_score = 72
-    if any(project.polished_bullets for project in state.projects):
-        expression_score += 12
-    if report.get("quality_questions"):
-        expression_score -= min(len(report["quality_questions"]) * 5, 15)
-
-    weaknesses = list(report.get("missing_fields", []))[:3] or list(report.get("quality_questions", []))[:3]
-    if not weaknesses:
-        weaknesses = ["可继续补充更多量化成果或第二段项目经历，增强竞争力。"]
-
-    return _normalize_score_report(
-        ResumeScoreReport(
-            completeness_score=completeness_score,
-            match_score=max(0, min(100, match_score)),
-            expression_score=max(0, min(100, expression_score)),
-            strengths=[
-                "简历已覆盖教育背景、项目经历、技能与获奖等核心模块。",
-                "结构化信息可直接用于模板生成和后续岗位定制。",
-            ],
-            weaknesses=weaknesses,
-            suggestions=[
-                "优先补充项目中的个人职责、技术方法和量化成果。",
-                "将项目 bullet 改写为完整简历句，避免短语堆叠。",
-                "围绕目标岗位补充更匹配的技能关键词。",
-            ],
-            summary="已基于结构完整度和现有字段生成兜底评分。",
-        ),
-        completeness_score,
-    )
-
-
-def _score_report_to_markdown(report: ResumeScoreReport) -> str:
-    """将评分报告格式化为 Markdown。
-
-    Args:
-        report: 结构化评分报告。
-
-    Returns:
-        Markdown 评分报告。
-    """
-
-    def list_block(items: list[str]) -> str:
-        """格式化列表字段。
-
-        Args:
-            items: 文本列表。
-
-        Returns:
-            Markdown 列表文本。
-        """
-
-        return "\n".join(f"- {item}" for item in items) if items else "- 暂无"
-
-    return "\n".join(
-        [
-            "## 简历评分报告",
-            "",
-            f"- **综合评分**：{report.total_score}/100",
-            f"- **完整度**：{report.completeness_score}/100",
-            f"- **岗位匹配度**：{report.match_score}/100",
-            f"- **表达规范性**：{report.expression_score}/100",
-            "",
-            "### 优势",
-            list_block(report.strengths),
-            "",
-            "### 主要问题",
-            list_block(report.weaknesses),
-            "",
-            "### 优化建议",
-            list_block(report.suggestions),
-            "",
-            "### 总结",
-            report.summary or "暂无总结。",
-        ]
-    )
-
-
 def _basic_fallback_extract(text: str, state: ResumeState) -> dict[str, Any]:
     """在 LLM 不可用时执行最小规则兜底抽取。
 
@@ -730,11 +159,6 @@ def _basic_fallback_extract(text: str, state: ResumeState) -> dict[str, Any]:
     for key in ("name", "native_place"):
         if matched.get(key):
             basic[key] = matched[key]
-    if matched.get("major"):
-        basic["major"] = matched["major"]
-    if matched.get("school"):
-        basic["university"] = matched["school"]
-
     for key in ("target_position", "target_industry", "expected_city"):
         if matched.get(key):
             job[key] = matched[key]
@@ -749,9 +173,8 @@ def _basic_fallback_extract(text: str, state: ResumeState) -> dict[str, Any]:
             education[key] = matched[key]
 
     university_match = re.search(r"([\u4e00-\u9fa5A-Za-z]+大学)(?!生)", text)
-    if university_match and not education.get("school") and not (state.education.school or state.basic_info.university):
+    if university_match and not education.get("school") and not state.education.school:
         education["school"] = university_match.group(1)
-        basic.setdefault("university", university_match.group(1))
 
     college_match = re.search(r"([\u4e00-\u9fa5A-Za-z]+学院)", text)
     if college_match and not education.get("college"):
@@ -1012,27 +435,10 @@ class ResumeAgentService:
         self.config = config or load_config()
         self.llm = build_chat_model(self.config) if use_llm else None
         self.turn_agent = build_langchain_agent(self.llm) if use_agent_driver else None
-        self.polish_agent = _build_polish_agent(self.llm) if use_agent_driver else None
-        self.import_agent = _build_import_agent(self.llm) if use_agent_driver else None
-        self.score_agent = _build_score_agent(self.llm) if use_agent_driver else None
+        self.polish_agent = build_polish_agent(self.llm) if use_agent_driver else None
+        self.import_agent = build_import_agent(self.llm) if use_agent_driver else None
+        self.score_agent = build_score_agent(self.llm) if use_agent_driver else None
         self.thread_id = str(uuid.uuid4())
-        self.use_agent_driver = use_agent_driver
-
-    def extract_update(self, user_input: str, state: ResumeState) -> dict[str, Any]:
-        """抽取用户本轮提供的简历字段更新。
-
-        Args:
-            user_input: 用户输入。
-            state: 当前简历状态。
-
-        Returns:
-            字段更新字典。
-        """
-
-        decision = self._decide_with_llm(user_input, state, check_missing_fields(state))
-        if decision is not None:
-            return _compact_patch(decision.patch) or {}
-        return _basic_fallback_extract(user_input, state)
 
     def handle_message(
         self,
@@ -1488,18 +894,3 @@ class ResumeAgentService:
 
         trace.append("fallback: polish_state_experiences")
         return polish_state_experiences(state, self.llm, force=True)
-
-    def _read_generated_markdown(self, output_path: str) -> str:
-        """从输出文件读取 Markdown 简历。
-
-        Args:
-            output_path: Markdown 文件路径。
-
-        Returns:
-            Markdown 文本；读取失败时返回空字符串。
-        """
-
-        try:
-            return Path(output_path).read_text(encoding="utf-8")
-        except OSError:
-            return ""
