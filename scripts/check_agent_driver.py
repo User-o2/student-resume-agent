@@ -57,10 +57,8 @@ def main() -> None:
     args = parser.parse_args()
 
     config = load_config()
-    print(f"provider: {config.provider}")
     print(f"base_url: {config.base_url}")
     print(f"model: {config.model}")
-    print(f"ssl_verify: {config.ssl_verify}")
 
     service = ResumeAgentService(config=config, use_llm=True, use_agent_driver=True)
 

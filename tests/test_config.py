@@ -8,7 +8,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from app.config import DEFAULT_ALIYUN_BASE_URL, load_config, normalize_openai_base_url, parse_bool_env, resolve_ssl_verify
+from app.config import AppConfig, load_config, normalize_openai_base_url
+from app.llm import build_chat_model, resolve_ssl_verify
 
 
 class ConfigTestCase(unittest.TestCase):
@@ -35,24 +36,19 @@ class ConfigTestCase(unittest.TestCase):
 
         self.assertTrue(ssl_verify)
 
-    def test_parse_bool_env_accepts_common_values(self) -> None:
-        """验证布尔环境变量常见写法。"""
-
-        self.assertTrue(parse_bool_env("true"))
-        self.assertFalse(parse_bool_env("false"))
-        self.assertIsNone(parse_bool_env("unknown"))
-
-    def test_load_config_prefers_official_aliyun_settings(self) -> None:
-        """验证官方阿里云配置会覆盖旧的统一 API 配置。"""
+    def test_load_config_reads_only_office_settings(self) -> None:
+        """验证配置只读取项目约定的三个 office 变量。"""
 
         env_text = "\n".join(
             [
                 "base_url=https://api_2604_w5t3.zlth.cn/v1/chat/completions",
                 "api_key=legacy-key",
                 "model=legacy-model",
-                "office_base_url=https://workspace.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
-                "office_api_key=official-key",
-                "office_model=official-model",
+                "OPENAI_BASE_URL=https://legacy.example.com/v1",
+                "OPENAI_API_KEY=openai-key",
+                "office_base_url=https://office.example.com/v1/chat/completions",
+                "office_api_key=office-key",
+                "office_model=office-model",
             ]
         )
 
@@ -62,20 +58,19 @@ class ConfigTestCase(unittest.TestCase):
             with patch.dict(os.environ, {}, clear=True):
                 config = load_config(env_path)
 
-        self.assertEqual(config.provider, "aliyun_official")
-        self.assertEqual(config.api_key, "official-key")
-        self.assertEqual(config.base_url, "https://workspace.cn-beijing.maas.aliyuncs.com/compatible-mode/v1")
-        self.assertEqual(config.model, "official-model")
-        self.assertTrue(config.ssl_verify)
+        self.assertEqual(config.api_key, "office-key")
+        self.assertEqual(config.base_url, "https://office.example.com/v1")
+        self.assertEqual(config.model, "office-model")
 
-    def test_load_config_uses_official_default_base_url_without_explicit_url(self) -> None:
-        """验证只配置官方 Key 时不会回退到旧的统一 API 地址。"""
+    def test_load_config_does_not_fallback_to_legacy_settings(self) -> None:
+        """验证缺少 office 变量时不会读取旧变量或设置默认值。"""
 
         env_text = "\n".join(
             [
                 "base_url=https://api_2604_w5t3.zlth.cn/v1/chat/completions",
                 "api_key=legacy-key",
-                "office_api_key=official-key",
+                "model=legacy-model",
+                "OPENAI_API_KEY=openai-key",
             ]
         )
 
@@ -85,10 +80,22 @@ class ConfigTestCase(unittest.TestCase):
             with patch.dict(os.environ, {}, clear=True):
                 config = load_config(env_path)
 
-        self.assertEqual(config.provider, "aliyun_official")
-        self.assertEqual(config.base_url, DEFAULT_ALIYUN_BASE_URL)
-        self.assertEqual(config.api_key, "official-key")
-        self.assertTrue(config.ssl_verify)
+        self.assertIsNone(config.base_url)
+        self.assertIsNone(config.api_key)
+        self.assertIsNone(config.model)
+
+    def test_build_chat_model_requires_all_three_office_settings(self) -> None:
+        """验证任一 office 配置缺失时不会创建不完整的模型客户端。"""
+
+        configs = [
+            AppConfig(api_key=None, base_url="https://api.example.com/v1", model="office-model"),
+            AppConfig(api_key="office-key", base_url=None, model="office-model"),
+            AppConfig(api_key="office-key", base_url="https://api.example.com/v1", model=None),
+        ]
+
+        for config in configs:
+            with self.subTest(config=config):
+                self.assertIsNone(build_chat_model(config))
 
 
 if __name__ == "__main__":

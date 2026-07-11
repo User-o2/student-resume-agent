@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import Any
+from urllib.parse import urlparse
 
 import httpx
 from langchain.agents import create_agent
@@ -26,6 +27,22 @@ from app.prompts import (
 )
 
 
+def resolve_ssl_verify(base_url: str | None) -> bool:
+    """确定模型接口是否启用 HTTPS 证书校验。
+
+    Args:
+        base_url: OpenAI 兼容接口基础地址。
+
+    Returns:
+        普通域名启用校验；带下划线的教学接口域名关闭校验。
+    """
+
+    hostname = urlparse(base_url or "").hostname or ""
+    # 教学接口域名可能包含下划线，而 Python/OpenSSL 不接受该主机名与
+    # 通配符证书匹配；此兼容逻辑是客户端参数，不属于环境配置来源。
+    return "_" not in hostname
+
+
 def build_chat_model(config: AppConfig | None = None) -> BaseChatModel | None:
     """构建 OpenAI 兼容的 LangChain 聊天模型。
 
@@ -37,11 +54,11 @@ def build_chat_model(config: AppConfig | None = None) -> BaseChatModel | None:
     """
 
     app_config = config or load_config()
-    if not app_config.api_key:
+    if not (app_config.api_key and app_config.base_url and app_config.model):
         return None
 
     http_client = httpx.Client(
-        verify=app_config.ssl_verify,
+        verify=resolve_ssl_verify(app_config.base_url),
         timeout=30,
         trust_env=True,
     )
@@ -50,10 +67,10 @@ def build_chat_model(config: AppConfig | None = None) -> BaseChatModel | None:
         model=app_config.model,
         api_key=app_config.api_key,
         base_url=app_config.base_url,
-        temperature=app_config.temperature,
+        temperature=0.2,
         timeout=30,
         max_retries=2,
-        extra_body={"enable_thinking": app_config.enable_thinking},
+        extra_body={"enable_thinking": False},
         http_client=http_client,
         http_socket_options=(),
     )

@@ -25,15 +25,13 @@ def main() -> None:
     """
 
     config = load_config()
-    print(f"provider: {config.provider}")
     print(f"base_url: {config.base_url}")
     print(f"model: {config.model}")
-    print(f"ssl_verify: {config.ssl_verify}")
     print(f"has_api_key: {bool(config.api_key)}")
 
     llm = build_chat_model(config)
     if llm is None:
-        raise RuntimeError("未读取到 API Key，请检查 .env 中的 office_api_key 或 api_key。")
+        raise RuntimeError("模型配置不完整，请检查 office_base_url、office_api_key 和 office_model。")
 
     start_time = time.perf_counter()
     response = llm.invoke("请只回复 OK")
