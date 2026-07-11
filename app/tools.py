@@ -712,13 +712,19 @@ def _join_or_default(items: list[str], default: str = "待补充", separator: st
     return separator.join(items) if items else default
 
 
-def _format_experiences(experiences: list[Experience], empty_text: str, max_items: int | None = None) -> str:
+def _format_experiences(
+    experiences: list[Experience],
+    empty_text: str,
+    max_items: int | None = None,
+    include_metadata: bool = False,
+) -> str:
     """格式化项目经历为新版模板 Markdown。
 
     Args:
         experiences: 经历列表。
         empty_text: 空列表时的展示文本。
         max_items: 最多展示的经历数量。
+        include_metadata: 是否展示组织、角色和起止时间。
 
     Returns:
         Markdown 文本。
@@ -733,6 +739,17 @@ def _format_experiences(experiences: list[Experience], empty_text: str, max_item
     for experience in selected_experiences:
         title = experience.title or "未命名经历"
         lines = [f"**{title}**"]
+        if include_metadata:
+            date_range = " - ".join(
+                item for item in [experience.start_date, experience.end_date] if item
+            )
+            metadata = [
+                item
+                for item in [experience.organization, experience.role, date_range]
+                if item
+            ]
+            if metadata:
+                lines.append(" | ".join(metadata))
         bullets = experience.polished_bullets or (experience.responsibilities + experience.results)
         if not bullets and experience.raw_description:
             bullets = polish_experience(experience.raw_description)
@@ -848,6 +865,12 @@ def build_template_context(state: ResumeState | Mapping[str, Any] | str | None) 
         "core_courses": _join_or_default(education.courses, separator="，"),
         "tech_stack": _format_tech_stack(skills, resume_state.projects),
         "projects": _format_experiences(resume_state.projects, "- 待补充", max_items=3),
+        "internships": _format_experiences(
+            resume_state.internships,
+            f"- {resume_state.internship_note or '暂无正式实习经历'}",
+            max_items=3,
+            include_metadata=True,
+        ),
         "awards": _format_awards(resume_state.awards),
         "self_evaluation": _format_self_evaluation(resume_state.self_evaluation),
         "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -1098,26 +1121,22 @@ def polish_experience_tool(raw_text: str, target_position: str = "") -> str:
 
 
 @tool
-def fill_resume_template_tool(current_state_json: str) -> str:
+def fill_resume_template_tool(current_state_json: str, output_path: str = "") -> str:
     """将结构化简历状态填入模板并保存 Markdown 简历。
 
     Args:
         current_state_json: 当前简历状态 JSON。
+        output_path: 可选的 Markdown 输出路径。
 
     Returns:
         包含 Markdown 内容和输出路径的 JSON。
     """
 
-    result = fill_resume_template(current_state_json)
-    preview = "\n".join(result["markdown"].splitlines()[:12])
-    return json.dumps(
-        {
-            "markdown": "",
-            "output_path": result["output_path"],
-            "preview": preview,
-        },
-        ensure_ascii=False,
+    result = fill_resume_template(
+        current_state_json,
+        output_path=output_path or None,
     )
+    return json.dumps(result, ensure_ascii=False)
 
 
 RESUME_TOOLS = [

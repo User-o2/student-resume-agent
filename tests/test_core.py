@@ -282,6 +282,53 @@ class ResumeToolTestCase(unittest.TestCase):
         self.assertIn("## 竞赛获奖", result["markdown"])
         self.assertTrue(Path(result["output_path"]).name.endswith("resume.md"))
 
+    def test_fill_resume_template_renders_internship_details_and_word(self) -> None:
+        """验证实习经历完整进入 Markdown，并可继续导出 Word。"""
+
+        state = collect_resume_info(
+            ResumeState(),
+            {
+                "basic_info": {"name": "李明"},
+                "internships": [
+                    {
+                        "title": "教务数据管理实践",
+                        "organization": "学校信息化办公室",
+                        "role": "后端开发实践",
+                        "start_date": "2025.03",
+                        "end_date": "2025.06",
+                        "responsibilities": ["使用 Python 与 Pandas 清洗课程成绩数据"],
+                        "results": ["将人工整理时间从半天缩短到约 30 分钟"],
+                    }
+                ],
+            },
+        )
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            markdown_path = Path(tmp_dir) / "resume.md"
+            word_path = Path(tmp_dir) / "resume.docx"
+            rendered = fill_resume_template(state, output_path=markdown_path)
+            export_resume_to_word(rendered["markdown"], output_path=word_path)
+            document = Document(word_path)
+
+        self.assertIn("## 实习经历", rendered["markdown"])
+        self.assertIn("教务数据管理实践", rendered["markdown"])
+        self.assertIn("学校信息化办公室 | 后端开发实践 | 2025.03 - 2025.06", rendered["markdown"])
+        self.assertIn("将人工整理时间从半天缩短到约 30 分钟", rendered["markdown"])
+        word_text = "\n".join(paragraph.text for paragraph in document.paragraphs)
+        self.assertIn("实习经历", word_text)
+        self.assertIn("教务数据管理实践", word_text)
+
+    def test_fill_resume_template_uses_internship_note_when_empty(self) -> None:
+        """验证没有实习记录时在模板中展示用户提供的说明。"""
+
+        state = ResumeState(internship_note="暂无正式实习经历，项目实践作为主要证明材料。")
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            result = fill_resume_template(state, output_path=Path(tmp_dir) / "resume.md")
+
+        self.assertIn("## 实习经历", result["markdown"])
+        self.assertIn("暂无正式实习经历，项目实践作为主要证明材料。", result["markdown"])
+
     def test_export_resume_to_word_writes_readable_docx(self) -> None:
         """验证已生成的 Markdown 简历可以导出为可读取的 Word 文件。"""
 

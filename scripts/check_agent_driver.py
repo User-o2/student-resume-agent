@@ -72,8 +72,13 @@ def main() -> None:
     print(f"elapsed_seconds: {time.perf_counter() - first_start:.2f}")
     print_turn_result("采集求职意向", first_turn)
 
-    if not any(item.startswith("调用工具：") for item in first_turn.agent_trace):
-        raise RuntimeError("采集场景没有发现真实 Agent 工具调用轨迹。")
+    required_tool_traces = {
+        "调用工具：collect_resume_info",
+        "调用工具：validate_resume_state",
+    }
+    missing_tool_traces = required_tool_traces.difference(first_turn.agent_trace)
+    if missing_tool_traces:
+        raise RuntimeError(f"采集场景缺少真实 LangChain Tool 调用：{sorted(missing_tool_traces)}")
     if not first_turn.state.job_intention.target_position:
         raise RuntimeError("Agent 没有成功更新求职意向。")
 

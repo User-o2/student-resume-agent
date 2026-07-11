@@ -7,6 +7,8 @@ import tempfile
 from pathlib import Path
 from unittest.mock import patch
 
+from langchain_core.tools import BaseTool
+
 from app.agent import ResumeAgentService, ResumeTurnDecision
 from app.schema import ResumeState
 from app.tools import collect_resume_info
@@ -66,6 +68,41 @@ class FakeDecisionService(ResumeAgentService):
         return self.polished_state or state
 
 
+class RecordingTurnAgent:
+    """记录结构化 Agent 调用配置的测试替身。"""
+
+    def __init__(self) -> None:
+        """初始化调用记录。
+
+        Args:
+            无。
+
+        Returns:
+            None。
+        """
+
+        self.configs: list[dict] = []
+
+    def invoke(self, input_data: dict, config: dict) -> dict:
+        """记录调用并返回固定结构化决策。
+
+        Args:
+            input_data: Agent 输入消息。
+            config: LangChain 调用配置。
+
+        Returns:
+            包含结构化响应的模拟 Agent 结果。
+        """
+
+        self.configs.append(config)
+        return {
+            "structured_response": ResumeTurnDecision(
+                intent="collect_info",
+                assistant_message="已记录，请继续补充。",
+            )
+        }
+
+
 def build_ready_state() -> ResumeState:
     """构造可生成简历的完整状态。
 
@@ -118,6 +155,81 @@ def build_ready_state() -> ResumeState:
 class ResumeAgentFlowTestCase(unittest.TestCase):
     """测试简历 Agent 的多轮阶段流转。"""
 
+    def test_turn_agent_uses_stable_thread_memory_without_manual_history(self) -> None:
+        """验证主对话 Agent 使用稳定线程，且不再维护重复的手工历史。"""
+
+        service = ResumeAgentService(use_llm=False, use_agent_driver=False)
+        recording_agent = RecordingTurnAgent()
+        service.turn_agent = recording_agent
+
+        first_result = service.handle_message("第一轮信息", ResumeState())
+        service.handle_message("第二轮信息", first_result.state)
+
+        thread_ids = [item["configurable"]["thread_id"] for item in recording_agent.configs]
+        self.assertEqual(len(thread_ids), 2)
+        self.assertEqual(thread_ids[0], thread_ids[1])
+        self.assertFalse(hasattr(service, "recent_turns"))
+
+    def test_service_instances_use_isolated_conversation_threads(self) -> None:
+        """验证不同服务实例不会共享 LangChain 对话线程。"""
+
+        first_service = ResumeAgentService(use_llm=False, use_agent_driver=False)
+        second_service = ResumeAgentService(use_llm=False, use_agent_driver=False)
+
+        self.assertNotEqual(first_service.thread_id, second_service.thread_id)
+
+    def test_service_explicitly_invokes_langchain_tools(self) -> None:
+        """验证固定编排流程真实调用状态合并、校验和模板 LangChain Tool。"""
+
+        decision = ResumeTurnDecision(
+            intent="generate_resume",
+            patch={"skills": {"tools": ["pytest"]}},
+            assistant_message="开始生成简历。",
+        )
+        service = FakeDecisionService([decision])
+        invoked_tools: list[str] = []
+        original_invoke = BaseTool.invoke
+
+        def recording_invoke(
+            tool_instance: BaseTool,
+            input_data: dict,
+            config: dict | None = None,
+            **kwargs: object,
+        ) -> str:
+            """记录工具名称后执行真实的 LangChain Tool。
+
+            Args:
+                tool_instance: 当前 LangChain Tool 实例。
+                input_data: 工具输入参数。
+                config: 可选的 LangChain 运行配置。
+                **kwargs: 其他调用参数。
+
+            Returns:
+                工具的原始字符串结果。
+            """
+
+            invoked_tools.append(tool_instance.name)
+            return original_invoke(tool_instance, input_data, config=config, **kwargs)
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            with (
+                patch("app.tools.OUTPUTS_DIR", Path(tmp_dir)),
+                patch.object(
+                    BaseTool,
+                    "invoke",
+                    new=recording_invoke,
+                ),
+            ):
+                result = service.handle_message("生成简历", build_ready_state())
+
+        self.assertIn("collect_resume_info_tool", invoked_tools)
+        self.assertGreaterEqual(invoked_tools.count("validate_resume_state_tool"), 2)
+        self.assertIn("fill_resume_template_tool", invoked_tools)
+        self.assertIn("调用工具：collect_resume_info", result.agent_trace)
+        self.assertIn("调用工具：validate_resume_state", result.agent_trace)
+        self.assertIn("调用工具：fill_resume_template", result.agent_trace)
+        self.assertIn("## 实习经历", result.resume_markdown)
+
     def test_offline_multi_turn_flow_reaches_generation(self) -> None:
         """验证规则兜底模式可以完成 5 轮以上采集并进入生成。"""
 
@@ -142,8 +254,11 @@ class ResumeAgentFlowTestCase(unittest.TestCase):
         self.assertEqual(state.basic_info.major, "计算机科学与技术")
 
         with patch(
-            "app.agent.fill_resume_template",
-            return_value={"markdown": "# 李明\n\n## 项目经历\n校园二手交易平台\n", "output_path": "/tmp/resume.md"},
+            "app.agent._fill_template_with_tool",
+            return_value={
+                "markdown": "# 李明\n\n## 项目经历\n校园二手交易平台\n",
+                "output_path": "/tmp/resume.md",
+            },
         ):
             generated = service.handle_message("生成简历", state)
 
@@ -279,16 +394,24 @@ class ResumeAgentFlowTestCase(unittest.TestCase):
         decision = ResumeTurnDecision(intent="generate_resume", patch={}, assistant_message="开始生成简历。")
         service = FakeDecisionService([decision], polished_state=polished_state)
 
-        def fake_fill(state: ResumeState) -> dict[str, str]:
-            """模拟模板填充并断言使用了清洗后的项目要点。
+        def fake_fill(
+            state: ResumeState,
+            trace: list[str],
+            output_path: Path | str | None = None,
+        ) -> dict[str, str]:
+            """模拟模板编排并断言使用了清洗后的项目要点。
 
             Args:
-                state: 传入模板填充函数的简历状态。
+                state: 待渲染的简历状态。
+                trace: Agent 执行轨迹。
+                output_path: 可选输出路径。
 
             Returns:
                 模拟的 Markdown 内容和输出路径。
             """
 
+            del output_path
+            trace.append("调用工具：fill_resume_template")
             self.assertEqual(state.projects[0].polished_bullets, polished_state.projects[0].polished_bullets)
             markdown = "\n".join(
                 [
@@ -300,7 +423,7 @@ class ResumeAgentFlowTestCase(unittest.TestCase):
             )
             return {"markdown": markdown, "output_path": "/tmp/resume.md"}
 
-        with patch("app.agent.fill_resume_template", side_effect=fake_fill):
+        with patch("app.agent._fill_template_with_tool", side_effect=fake_fill):
             result = service.handle_message("生成简历", ready_state)
 
         self.assertNotIn("待补充", result.resume_markdown)
@@ -328,6 +451,11 @@ class ResumeAgentFlowTestCase(unittest.TestCase):
 - 负责数据清洗
 - 准确率99.1%
 
+## 实习经历
+**实验室视觉算法实践**
+- 协助整理图像数据并维护训练脚本
+- 完成 3 组对比实验
+
 ## 竞赛获奖
 **数学建模竞赛省级一等奖**
 - 团队排名前8%
@@ -343,6 +471,8 @@ class ResumeAgentFlowTestCase(unittest.TestCase):
 
         self.assertEqual(result.state.basic_info.name, "张明")
         self.assertIn("图像识别系统", result.markdown)
+        self.assertEqual(result.state.internships[0].title, "实验室视觉算法实践")
+        self.assertIn("实验室视觉算法实践", result.markdown)
         self.assertTrue(Path(result.output_path).name.endswith("optimized.md"))
 
     def test_score_existing_resume_offline_returns_markdown_report(self) -> None:

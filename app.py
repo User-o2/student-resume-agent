@@ -70,6 +70,10 @@ def init_session_state() -> None:
         st.session_state.pending_user_input = ""
     if "session_log_path" not in st.session_state:
         st.session_state.session_log_path = new_session_log_path()
+    if "agent_service" not in st.session_state:
+        st.session_state.agent_service = None
+    if "agent_service_use_llm" not in st.session_state:
+        st.session_state.agent_service_use_llm = None
 
 
 def save_conversation_log(event: str = "turn_complete") -> None:
@@ -100,18 +104,22 @@ def save_conversation_log(event: str = "turn_complete") -> None:
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-@st.cache_resource(show_spinner=False)
 def get_agent_service(use_llm: bool) -> ResumeAgentService:
-    """获取缓存的 Agent 服务。
+    """获取当前用户会话独占的 Agent 服务。
 
     Args:
         use_llm: 是否启用 LLM 抽取与润色。
 
     Returns:
-        简历 Agent 服务实例。
+        当前 Streamlit 会话的简历 Agent 服务实例。
     """
 
-    return ResumeAgentService(use_llm=use_llm)
+    service = st.session_state.agent_service
+    if service is None or st.session_state.agent_service_use_llm != use_llm:
+        service = ResumeAgentService(use_llm=use_llm)
+        st.session_state.agent_service = service
+        st.session_state.agent_service_use_llm = use_llm
+    return service
 
 
 def reset_session() -> None:
@@ -141,6 +149,9 @@ def reset_session() -> None:
     st.session_state.agent_trace_history = []
     st.session_state.pending_user_input = ""
     st.session_state.session_log_path = new_session_log_path()
+    # ResumeState 保存简历业务事实；重建 Agent 服务用于清空当前会话的消息记忆。
+    st.session_state.agent_service = None
+    st.session_state.agent_service_use_llm = None
     save_conversation_log("reset")
 
 
@@ -160,6 +171,9 @@ def render_sidebar(use_llm: bool) -> None:
     st.sidebar.header("状态")
     st.sidebar.caption(f"阶段：{STAGE_LABELS.get(state.current_stage, state.current_stage)}")
     st.sidebar.caption(f"LLM：{'启用' if use_llm else '关闭'}")
+    if st.sidebar.button("重置当前会话", use_container_width=True):
+        reset_session()
+        st.rerun()
 
     if report["missing_fields"]:
         st.sidebar.subheader("待补充")

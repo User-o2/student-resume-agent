@@ -33,10 +33,12 @@ from app.schema import ResumeState
 from app.tools import (
     check_missing_fields,
     collect_resume_info,
+    collect_resume_info_tool,
     coerce_resume_state,
-    fill_resume_template,
+    fill_resume_template_tool,
     parse_json_object,
     polish_state_experiences,
+    validate_resume_state_tool,
 )
 
 
@@ -205,6 +207,8 @@ def build_langchain_agent(llm: BaseChatModel | None = None) -> Any | None:
 
     if llm is None:
         return None
+    # Checkpointer 只保存对话语境；姓名、经历等业务事实始终以每轮传入的
+    # ResumeState 为准，避免再维护一份手工对话摘要作为事实来源。
     return create_agent(
         model=llm,
         tools=[],
@@ -231,7 +235,6 @@ def _build_polish_agent(llm: BaseChatModel | None = None) -> Any | None:
         tools=[],
         system_prompt=FINAL_POLISH_SYSTEM_PROMPT,
         response_format=ToolStrategy(ResumePolishResult),
-        checkpointer=InMemorySaver(),
     )
 
 
@@ -252,7 +255,6 @@ def _build_import_agent(llm: BaseChatModel | None = None) -> Any | None:
         tools=[],
         system_prompt=IMPORT_RESUME_SYSTEM_PROMPT,
         response_format=ToolStrategy(ResumeImportResult),
-        checkpointer=InMemorySaver(),
     )
 
 
@@ -273,7 +275,6 @@ def _build_score_agent(llm: BaseChatModel | None = None) -> Any | None:
         tools=[],
         system_prompt=RESUME_SCORE_SYSTEM_PROMPT,
         response_format=ToolStrategy(ResumeScoreReport),
-        checkpointer=InMemorySaver(),
     )
 
 
@@ -406,6 +407,33 @@ def _parse_titled_markdown_blocks(section_text: str) -> list[tuple[str, list[str
     return blocks
 
 
+def _parse_experience_section(markdown_text: str, heading: str) -> list[dict[str, Any]]:
+    """将项目或实习 Markdown 小节解析为经历补丁。
+
+    Args:
+        markdown_text: 完整 Markdown 简历。
+        heading: 待解析的二级标题。
+
+    Returns:
+        可写入 ResumeState 的经历字典列表。
+    """
+
+    blocks = _parse_titled_markdown_blocks(_extract_markdown_section(markdown_text, heading))
+    return [
+        {
+            "title": title,
+            "raw_description": "；".join(items),
+            "responsibilities": items,
+            "results": [
+                item
+                for item in items
+                if re.search(r"\d|%|提升|准确率|响应|完成|排名|F1", item, flags=re.IGNORECASE)
+            ],
+        }
+        for title, items in blocks
+    ]
+
+
 def _parse_existing_resume_fallback(markdown_text: str) -> ResumeState:
     """使用轻量规则解析标准 Markdown 简历。
 
@@ -469,17 +497,13 @@ def _parse_existing_resume_fallback(markdown_text: str) -> ResumeState:
     if education_update:
         update["education"] = education_update
 
-    project_blocks = _parse_titled_markdown_blocks(_extract_markdown_section(markdown_text, "项目经历"))
-    if project_blocks:
-        update["projects"] = [
-            {
-                "title": title,
-                "raw_description": "；".join(items),
-                "responsibilities": items,
-                "results": [item for item in items if re.search(r"\d|%|提升|准确率|响应|完成|排名|F1", item, flags=re.IGNORECASE)],
-            }
-            for title, items in project_blocks
-        ]
+    projects = _parse_experience_section(markdown_text, "项目经历")
+    if projects:
+        update["projects"] = projects
+
+    internships = _parse_experience_section(markdown_text, "实习经历")
+    if internships:
+        update["internships"] = internships
 
     award_blocks = _parse_titled_markdown_blocks(_extract_markdown_section(markdown_text, "竞赛获奖"))
     if award_blocks:
@@ -887,8 +911,86 @@ def _extract_structured_response(raw_result: dict[str, Any], model_type: type[Ba
     return None
 
 
+def _collect_with_tool(
+    state: ResumeState,
+    updates: dict[str, Any],
+    trace: list[str],
+) -> ResumeState:
+    """通过 LangChain Tool 合并本轮结构化信息。
+
+    Args:
+        state: 当前简历状态。
+        updates: 本轮字段补丁。
+        trace: Agent 执行轨迹。
+
+    Returns:
+        合并后的简历状态。
+    """
+
+    state_json = collect_resume_info_tool.invoke(
+        {
+            "current_state_json": state.model_dump_json(ensure_ascii=False),
+            "update_json": json.dumps(updates, ensure_ascii=False),
+        }
+    )
+    trace.append("调用工具：collect_resume_info")
+    return coerce_resume_state(state_json)
+
+
+def _validate_with_tool(state: ResumeState, trace: list[str]) -> dict[str, Any]:
+    """通过 LangChain Tool 执行简历底线校验。
+
+    Args:
+        state: 当前简历状态。
+        trace: Agent 执行轨迹。
+
+    Returns:
+        缺失字段、格式错误和生成状态报告。
+    """
+
+    report_json = validate_resume_state_tool.invoke(
+        {"current_state_json": state.model_dump_json(ensure_ascii=False)}
+    )
+    trace.append("调用工具：validate_resume_state")
+    return json.loads(report_json)
+
+
+def _fill_template_with_tool(
+    state: ResumeState,
+    trace: list[str],
+    output_path: Path | str | None = None,
+) -> dict[str, str]:
+    """通过 LangChain Tool 渲染并保存 Markdown 简历。
+
+    Args:
+        state: 待渲染的完整简历状态。
+        trace: Agent 执行轨迹。
+        output_path: 可选的 Markdown 输出路径。
+
+    Returns:
+        Markdown 内容和输出路径。
+    """
+
+    result_json = fill_resume_template_tool.invoke(
+        {
+            "current_state_json": state.model_dump_json(ensure_ascii=False),
+            "output_path": str(output_path) if output_path else "",
+        }
+    )
+    result = json.loads(result_json)
+    trace.append("调用工具：fill_resume_template")
+    return {
+        "markdown": str(result["markdown"]),
+        "output_path": str(result["output_path"]),
+    }
+
+
 class ResumeAgentService:
-    """面向 UI 和脚本的简历 Agent 服务。"""
+    """面向 UI 和脚本的简历 Agent 服务。
+
+    ResumeState 负责跨轮保存简历业务事实，主对话 Agent 的 checkpointer
+    仅负责理解代词、省略和上下文衔接；导入、润色和评分均为一次性任务。
+    """
 
     def __init__(
         self,
@@ -915,7 +1017,6 @@ class ResumeAgentService:
         self.score_agent = _build_score_agent(self.llm) if use_agent_driver else None
         self.thread_id = str(uuid.uuid4())
         self.use_agent_driver = use_agent_driver
-        self.recent_turns: list[dict[str, str]] = []
 
     def extract_update(self, user_input: str, state: ResumeState) -> dict[str, Any]:
         """抽取用户本轮提供的简历字段更新。
@@ -949,8 +1050,8 @@ class ResumeAgentService:
         """
 
         resume_state = coerce_resume_state(state)
-        initial_report = check_missing_fields(resume_state)
         trace: list[str] = []
+        initial_report = _validate_with_tool(resume_state, trace)
 
         decision = self._decide_with_llm(user_input, resume_state, initial_report)
         if decision is None:
@@ -961,32 +1062,28 @@ class ResumeAgentService:
 
         patch = _compact_patch(decision.patch) or {}
         if patch:
-            resume_state = collect_resume_info(resume_state, patch)
-            trace.append("调用工具：collect_resume_info")
+            resume_state = _collect_with_tool(resume_state, patch, trace)
+            report = _validate_with_tool(resume_state, trace)
+        else:
+            report = initial_report
 
-        report = check_missing_fields(resume_state)
-        trace.append("调用工具：validate_resume_state")
         resume_state = _sync_stage(resume_state, report)
-        report = check_missing_fields(resume_state)
+        report["current_stage"] = resume_state.current_stage
 
         should_generate = _contains_generate_intent(user_input) or decision.intent == "generate_resume"
         if should_generate:
             if not report["is_ready"]:
                 message = f"现在还不能生成完整简历，仍需补充：{'；'.join(report['missing_fields'])}\n\n{_decision_message(decision, report)}"
-                self._remember_turn(user_input, message)
                 return AgentTurnResult(message, resume_state, report, agent_trace=trace)
 
             polished_state = self._polish_state_before_generation(resume_state, trace)
-            polished_report = check_missing_fields(polished_state)
+            polished_report = _validate_with_tool(polished_state, trace)
             if not polished_report["is_ready"]:
                 message = f"生成前校验发现还缺少：{'；'.join(polished_report['missing_fields'])}\n\n{_build_fallback_question(polished_report)}"
-                self._remember_turn(user_input, message)
                 return AgentTurnResult(message, polished_state, polished_report, agent_trace=trace)
 
-            result = fill_resume_template(polished_state)
-            trace.append("调用工具：fill_resume_template")
+            result = _fill_template_with_tool(polished_state, trace)
             message = f"已生成 Markdown 简历：{result['output_path']}\n\n{result['markdown']}"
-            self._remember_turn(user_input, message)
             return AgentTurnResult(
                 assistant_message=message,
                 state=polished_state,
@@ -999,7 +1096,6 @@ class ResumeAgentService:
         message = _decision_message(decision, report)
         if report["is_ready"] and "生成简历" not in message:
             message = f"{message}\n\n必要信息已完整，可以回复“生成简历”输出 Markdown 简历。"
-        self._remember_turn(user_input, message)
         return AgentTurnResult(message, resume_state, report, agent_trace=trace)
 
     def optimize_existing_resume(
@@ -1033,15 +1129,13 @@ class ResumeAgentService:
             parsed_state = import_result.state
             summary = import_result.summary or "已使用 LLM 解析已有 Markdown 简历。"
 
-        parsed_report = check_missing_fields(parsed_state)
+        parsed_report = _validate_with_tool(parsed_state, trace)
         parsed_state = _sync_stage(parsed_state, parsed_report)
-        trace.append("调用工具：validate_resume_state")
 
         optimized_state = self._polish_state_before_generation(parsed_state, trace)
-        optimized_report = check_missing_fields(optimized_state)
+        optimized_report = _validate_with_tool(optimized_state, trace)
         optimized_state = _sync_stage(optimized_state, optimized_report)
-        result = fill_resume_template(optimized_state, output_path=output_path)
-        trace.append("调用工具：fill_resume_template")
+        result = _fill_template_with_tool(optimized_state, trace, output_path=output_path)
 
         return ExistingResumeOptimizationResult(
             state=optimized_state,
@@ -1070,10 +1164,10 @@ class ResumeAgentService:
         """
 
         resume_state = coerce_resume_state(state)
-        validation_report = check_missing_fields(resume_state)
+        trace: list[str] = []
+        validation_report = _validate_with_tool(resume_state, trace)
         completeness_score = _calculate_completeness_score(resume_state, validation_report)
         target = target_position.strip() or resume_state.job_intention.target_position or "学生求职/实习"
-        trace: list[str] = ["调用工具：validate_resume_state"]
 
         score_report = self._score_resume_with_llm(
             resume_state,
@@ -1153,14 +1247,13 @@ class ResumeAgentService:
             prompt = TURN_DECISION_USER_PROMPT.format(
                 state_json=state.model_dump_json(ensure_ascii=False),
                 validation_report=json.dumps(report, ensure_ascii=False),
-                recent_turns=json.dumps(self.recent_turns[-6:], ensure_ascii=False),
                 user_input=user_input,
             )
             try:
                 raw_result = self.turn_agent.invoke(
                     {"messages": [{"role": "user", "content": prompt}]},
                     config={
-                        "configurable": {"thread_id": f"{self.thread_id}:turn:{uuid.uuid4()}"},
+                        "configurable": {"thread_id": f"{self.thread_id}:turn"},
                         "recursion_limit": 6,
                     },
                 )
@@ -1184,7 +1277,6 @@ class ResumeAgentService:
                 {
                     "state_json": state.model_dump_json(ensure_ascii=False),
                     "validation_report": json.dumps(report, ensure_ascii=False),
-                    "recent_turns": json.dumps(self.recent_turns[-6:], ensure_ascii=False),
                     "user_input": user_input,
                 }
             )
@@ -1396,25 +1488,6 @@ class ResumeAgentService:
 
         trace.append("fallback: polish_state_experiences")
         return polish_state_experiences(state, self.llm, force=True)
-
-    def _remember_turn(self, user_input: str, assistant_message: str) -> None:
-        """记录最近对话摘要供下一轮 LLM 使用。
-
-        Args:
-            user_input: 用户输入。
-            assistant_message: 助手回复。
-
-        Returns:
-            None。
-        """
-
-        self.recent_turns.append(
-            {
-                "user": user_input,
-                "assistant": assistant_message[:600],
-            }
-        )
-        self.recent_turns = self.recent_turns[-8:]
 
     def _read_generated_markdown(self, output_path: str) -> str:
         """从输出文件读取 Markdown 简历。

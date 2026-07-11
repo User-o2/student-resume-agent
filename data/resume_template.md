@@ -15,6 +15,9 @@
 ## 项目经历
 {{ projects }}
 
+## 实习经历
+{{ internships }}
+
 ## 竞赛获奖
 {{ awards }}
 

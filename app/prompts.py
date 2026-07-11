@@ -43,9 +43,6 @@ TURN_DECISION_USER_PROMPT = """## 当前结构化状态 JSON
 ## 当前底线校验报告 JSON
 {validation_report}
 
-## 最近对话摘要 JSON
-{recent_turns}
-
 ## 用户本轮输入
 {user_input}
 
