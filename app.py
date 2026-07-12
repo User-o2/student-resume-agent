@@ -115,6 +115,8 @@ def get_agent_service(use_llm: bool) -> ResumeAgentService:
     """
 
     service = st.session_state.agent_service
+    # Agent 内部带有 LangGraph 消息记忆，因此同一浏览器会话必须复用实例
+    # 仅在用户切换 LLM 模式时重建，防止旧模型配置和旧消息继续生效
     if service is None or st.session_state.agent_service_use_llm != use_llm:
         service = ResumeAgentService(use_llm=use_llm)
         st.session_state.agent_service = service
@@ -226,6 +228,8 @@ def enqueue_user_message(user_input: str) -> None:
         None。
     """
 
+    # Streamlit 提交输入后会立即 rerun；先入队再在下一阶段处理，能够让用户消息
+    # 先渲染出来，也可避免同一次重绘中重复调用耗时的 Agent
     st.session_state.messages.append({"role": "user", "content": user_input})
     st.session_state.pending_user_input = user_input
 
@@ -253,6 +257,7 @@ def process_pending_message(use_llm: bool) -> None:
     if result.resume_markdown:
         st.session_state.resume_markdown = result.resume_markdown
         st.session_state.output_path = result.output_path
+        # Markdown 更新后旧 Word 二进制已经失效，必须等用户再次导出时重新生成
         st.session_state.word_document = b""
         st.session_state.word_output_path = ""
     st.session_state.agent_trace = result.agent_trace

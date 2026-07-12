@@ -46,6 +46,7 @@ def parse_json_object(text: str) -> dict[str, Any]:
 
     cleaned = text.strip()
     if cleaned.startswith("```"):
+        # 兼容模型常见的 ```json ... ``` 包装，再尝试解析其中的对象
         cleaned = re.sub(r"^```(?:json)?", "", cleaned, flags=re.IGNORECASE).strip()
         cleaned = re.sub(r"```$", "", cleaned).strip()
 
@@ -187,6 +188,8 @@ def _normalize_resume_payload(payload: Any, key: str = "") -> Any:
     }
     record_list_fields = {"projects", "internships", "awards"}
 
+    # 模型偶尔会把单条经历返回为对象、把列表字段返回为分隔字符串
+    # 在进入 Pydantic 前统一字段形状，避免为同类错误散落多套兼容代码
     if key in record_list_fields and isinstance(payload, Mapping):
         payload = [payload]
     if key in list_fields:
@@ -336,6 +339,7 @@ def collect_resume_info(
         return resume_state
 
     data = resume_state.model_dump()
+    # 经历类列表不能用普通字典覆盖：先按标题合并增量，再处理其余标量字段
     for key in ("projects", "internships"):
         if isinstance(patch.get(key), list):
             data[key] = _merge_records(data.get(key, []), patch[key], "title")
@@ -878,6 +882,7 @@ def fill_resume_template(
     if not template_file.exists():
         raise FileNotFoundError(f"简历模板不存在：{template_file}")
 
+    # StrictUndefined 让模板字段遗漏立即报错，避免生成缺少章节的简历
     env = Environment(
         loader=FileSystemLoader(str(template_file.parent)),
         undefined=StrictUndefined,
@@ -956,6 +961,8 @@ def _create_word_document(markdown_text: str) -> Document:
     normal_style.font.name = "Microsoft YaHei"
     normal_style.element.get_or_add_rPr().get_or_add_rFonts().set(qn("w:eastAsia"), "Microsoft YaHei")
 
+    # 这里只转换项目模板会产生的 Markdown 子集；按标题、列表、普通段落的
+    # 优先级逐行处理，可以保持导出的 Word 结构稳定且便于测试
     for raw_line in markdown_text.splitlines():
         line = raw_line.rstrip()
         if not line:

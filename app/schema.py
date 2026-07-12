@@ -36,12 +36,14 @@ def migrate_legacy_resume_data(data: Any, prefer_legacy: bool = False) -> Any:
     if not isinstance(data, Mapping):
         return data
 
+    # 复制后再迁移，避免 Pydantic 预校验意外修改调用方持有的原始字典
     payload = dict(data)
     basic_info = dict(payload.get("basic_info") or {})
     education = dict(payload.get("education") or {})
     legacy_school = basic_info.pop("university", "")
     legacy_major = basic_info.pop("major", "")
 
+    # 全量历史状态只在新字段为空时迁移；本轮旧格式补丁则允许显式修正现值
     if legacy_school and (prefer_legacy or not education.get("school")):
         education["school"] = legacy_school
     if legacy_major and (prefer_legacy or not education.get("major")):
@@ -144,6 +146,7 @@ class ResumeState(BaseModel):
             学校、专业已迁移到 education 的状态数据。
         """
 
+        # 必须在子模型校验前迁移，否则 BasicInfo 会先丢弃已废弃的学校、专业字段
         return migrate_legacy_resume_data(data)
 
     def touch(self) -> None:

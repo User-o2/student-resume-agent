@@ -31,6 +31,7 @@ def collect_resume_info_tool(current_state_json: str, update_json: str) -> str:
         更新后的简历状态 JSON。
     """
 
+    # Tool 边界统一使用 JSON，避免 LangChain 将复杂 Pydantic 对象序列化成不稳定参数
     state = collect_resume_info(current_state_json, update_json)
     return state.model_dump_json(ensure_ascii=False)
 

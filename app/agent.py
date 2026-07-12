@@ -100,6 +100,7 @@ def _compact_patch(value: Any, key: str = "") -> Any:
         压缩后的值。
     """
 
+    # 阶段和时间戳由程序维护，不能允许模型补丁覆盖这些控制字段
     if key in {"current_stage", "created_at", "updated_at"}:
         return None
     if isinstance(value, BaseModel):
@@ -195,6 +196,8 @@ def _basic_fallback_extract(text: str, state: ResumeState) -> dict[str, Any]:
         skills["programming_languages"] = [item for item in skill_items if item in languages]
         skills["tools"] = [item for item in skill_items if item not in languages]
 
+    # “负责项目、善于建模”等自我评价可能命中项目关键词；进入自我评价阶段后，
+    # 只有出现明确经历标签时才继续按项目或奖项解析
     self_evaluation_mode = state.current_stage == "self_evaluation" and not re.search(
         r"(项目经历|项目名称|项目[:：]|获奖|奖学金|证书)",
         text,
@@ -457,6 +460,7 @@ class ResumeAgentService:
 
         resume_state = coerce_resume_state(state)
         trace: list[str] = []
+        # 先校验再决策，让 LLM 的追问基于代码判定的真实缺口，而不是自行猜测完整度
         initial_report = _validate_with_tool(resume_state, trace)
 
         decision = self._decide_with_llm(user_input, resume_state, initial_report)
@@ -468,6 +472,7 @@ class ResumeAgentService:
 
         patch = _compact_patch(decision.patch) or {}
         if patch:
+            # 模型负责生成增量补丁；状态合并和再次校验统一通过调用 Tool
             resume_state = _collect_with_tool(resume_state, patch, trace)
             report = _validate_with_tool(resume_state, trace)
         else:
@@ -478,6 +483,7 @@ class ResumeAgentService:
 
         should_generate = _contains_generate_intent(user_input) or decision.intent == "generate_resume"
         if should_generate:
+            # 生成前设置两道校验：首次阻止缺字段状态，润色后再次防止模型清洗时丢字段
             if not report["is_ready"]:
                 message = f"现在还不能生成完整简历，仍需补充：{'；'.join(report['missing_fields'])}\n\n{_decision_message(decision, report)}"
                 return AgentTurnResult(message, resume_state, report, agent_trace=trace)
@@ -587,6 +593,7 @@ class ResumeAgentService:
             score_report = _fallback_score_report(resume_state, completeness_score, validation_report)
             trace.append("fallback: score_resume")
         else:
+            # 完整度和综合分由代码重算，LLM 只评价岗位匹配与表达，保证评分口径稳定
             score_report = _normalize_score_report(score_report, completeness_score)
 
         return ResumeScoreResult(
@@ -649,6 +656,7 @@ class ResumeAgentService:
             LLM 决策；失败时返回 None。
         """
 
+        # 优先使用 ToolStrategy 获得经 Pydantic 校验的结构化结果
         if self.turn_agent is not None:
             prompt = TURN_DECISION_USER_PROMPT.format(
                 state_json=state.model_dump_json(ensure_ascii=False),
@@ -672,6 +680,7 @@ class ResumeAgentService:
         if self.llm is None:
             return None
 
+        # 部分 OpenAI 兼容模型不支持结构化工具调用，保留纯 JSON Prompt 作为兼容层
         prompt = ChatPromptTemplate.from_messages(
             [
                 ("system", TURN_DECISION_SYSTEM_PROMPT),
@@ -715,6 +724,7 @@ class ResumeAgentService:
                 raw_result = self.import_agent.invoke(
                     {"messages": [{"role": "user", "content": prompt}]},
                     config={
+                        # 导入是一次性任务，独立 thread_id 防止多份简历互相污染上下文
                         "configurable": {"thread_id": f"{self.thread_id}:import:{uuid.uuid4()}"},
                         "recursion_limit": 6,
                     },

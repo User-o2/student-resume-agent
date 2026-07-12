@@ -25,6 +25,7 @@ def calculate_completeness_score(state: ResumeState, report: dict[str, Any]) -> 
         0-100 的完整度分数。
     """
 
+    # 每个布尔项代表一个可独立补充的信息点，使用等权计数保持规则透明可复现
     checks = [
         bool(state.basic_info.name),
         bool(state.basic_info.phone),
@@ -48,6 +49,7 @@ def calculate_completeness_score(state: ResumeState, report: dict[str, Any]) -> 
         bool(state.self_evaluation),
     ]
     base_score = round(sum(checks) / len(checks) * 100)
+    # 格式错误会降低可用性，但封顶 20 分，避免完全掩盖已经填写的主体内容
     penalty = min(len(report.get("validation_errors", [])) * 8, 20)
     return max(0, min(100, base_score - penalty))
 
@@ -63,6 +65,7 @@ def normalize_score_report(report: ResumeScoreReport, completeness_score: int) -
         规整后的评分报告。
     """
 
+    # 深拷贝避免评分展示阶段反向修改 Agent 返回的原始结构化对象
     normalized = report.model_copy(deep=True)
     normalized.completeness_score = completeness_score
     normalized.match_score = max(0, min(100, normalized.match_score))

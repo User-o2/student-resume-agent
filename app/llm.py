@@ -70,6 +70,7 @@ def build_chat_model(config: AppConfig | None = None) -> BaseChatModel | None:
         temperature=0.2,
         timeout=30,
         max_retries=2,
+        # 关闭服务端思考输出
         extra_body={"enable_thinking": False},
         http_client=http_client,
         http_socket_options=(),
@@ -111,6 +112,7 @@ def build_polish_agent(llm: BaseChatModel | None = None) -> Any | None:
 
     if llm is None:
         return None
+    # 润色属于无跨轮依赖的一次性任务，不配置 checkpointer
     return create_agent(
         model=llm,
         tools=[],

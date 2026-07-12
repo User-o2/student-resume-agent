@@ -50,6 +50,7 @@ def _extract_markdown_section(markdown_text: str, heading: str) -> str:
         标题下方内容；不存在时返回空字符串。
     """
 
+    # 非贪婪匹配到下一个二级标题，避免当前章节吞掉后续简历内容
     pattern = rf"^##\s+{re.escape(heading)}\s*$([\s\S]*?)(?=^##\s+|\Z)"
     match = re.search(pattern, markdown_text, flags=re.MULTILINE)
     return match.group(1).strip() if match else ""
@@ -72,6 +73,7 @@ def _parse_titled_markdown_blocks(section_text: str) -> list[tuple[str, list[str
         line = raw_line.strip()
         title_match = re.fullmatch(r"\*\*(.+?)\*\*", line)
         if title_match:
+            # 遇到下一条加粗标题时，先提交上一块已累计的 bullet
             if current_title:
                 blocks.append((current_title, current_items))
             current_title = title_match.group(1).strip()
@@ -101,6 +103,7 @@ def _parse_experience_section(markdown_text: str, heading: str) -> list[dict[str
             "title": title,
             "raw_description": "；".join(items),
             "responsibilities": items,
+            # 带数字、比例或效果词的 bullet 更可能是成果，规则解析时单独标记
             "results": [
                 item
                 for item in items
@@ -200,4 +203,5 @@ def parse_existing_resume(markdown_text: str) -> ResumeState:
             if line.strip().lstrip("-").strip()
         )
 
+    # 复用统一合并入口完成字段规整和 Pydantic 校验，保证导入与对话采集口径一致
     return collect_resume_info(state, update)

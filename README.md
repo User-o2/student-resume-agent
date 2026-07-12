@@ -151,6 +151,12 @@ streamlit run app.py
 
 默认在浏览器打开 `http://localhost:8501`。
 
+## 数据目录说明
+
+1. `data/resume_case`：智能体生成的 markdown 简历示例
+2. `data/resume_to_optimize`：待优化的 markdown 简历示例，可以上传到应用中进行解析和优化
+3. `data/resume_template.md`：简历模板，智能体生成的简历会填充该模板
+
 ## 使用方式
 
 ### 对话生成
