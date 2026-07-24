@@ -4,6 +4,11 @@
 
 使用的模型型号为 `qwen3.6-35b-a3b`，运行时关闭 thinking 模式。
 
+<img width="1920" height="1079" alt="主界面功能介绍" src="https://github.com/user-attachments/assets/3086921a-f005-47b1-bc95-646705421287" />
+<img width="1920" height="1079" alt="项目细节询问" src="https://github.com/user-attachments/assets/66c063dc-fb1e-4279-ad3d-3799ea9b1b11" />
+
+
+
 ## 功能
 
 ### 多轮对话生成简历
